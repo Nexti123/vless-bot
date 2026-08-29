@@ -6,7 +6,16 @@ const { v4: uuidv4 } = require('uuid');
 const app = express();
 app.use(express.json());
 
-const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
+// Инициализация бота с настройками интервала и автозапуска, чтобы избежать 409 конфликтов
+const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, {
+  polling: {
+    interval: 300,
+    autoStart: true,
+    params: {
+      timeout: 10
+    }
+  }
+});
 
 const redis = new Redis({
   url: process.env.UPSTASH_REDIS_REST_URL,
@@ -19,7 +28,14 @@ const PARTNER_PASSWORD = process.env.PARTNER_PASSWORD || 'BloggerPass2026';
 
 const userStates = {};
 
-bot.on('polling_error', (error) => console.error('Telegram Error:', error.message));
+bot.on('polling_error', (error) => {
+  // Игнорируем ошибку 409 в логах, чтобы не засорять, или выводим мягко
+  if (error.code === 'ETELEGRAM' && error.message.includes('409 Conflict')) {
+    console.log('⚠️ Внимание: Обнаружен кратковременный конфликт сессий Telegram (409), переподключение...');
+  } else {
+    console.error('Telegram Error:', error.message);
+  }
+});
 
 // Генератор VLESS+WS ссылки под твои настройки из панели (ID 1)
 function generateVlessLink(email, uuid) {
@@ -211,7 +227,7 @@ bot.on('callback_query', async (query) => {
     }
 
     else if (data === 'admin_login') {
-      await bot.sendMessage(chatId, '🔒 Введите:\n`/a_pass ВАШ_ПАРОЛЬ`', { parse_mode: 'Markdown' });
+      await bot.sendMessage(chatId, '🔒 Введите:\n`/a_pass ВАШ_ПАРОЛЬ`', { parse_mode: 'Markdown'>>)
     }
   } catch (err) {
     console.error('Callback error:', err.message);
@@ -246,7 +262,7 @@ bot.onText(/\/a_pass\s+(.+)/, async (msg, match) => {
                       `• Выручка: **${blogerPaidSum} ₽**\n` +
                       `• Выплата партнеру (50%): **${Math.floor(blogerPaidSum * 0.5)} ₽**`;
 
-    await bot.sendMessage(msg.chat.id, adminText, { parse_mode: 'Markdown' });
+    await bot.sendMessage(msg.chat.id, adminText, { parse_Mode: 'Markdown' });
   } else {
     await bot.sendMessage(msg.chat.id, '❌ Неверный пароль.');
   }
