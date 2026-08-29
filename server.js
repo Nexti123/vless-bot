@@ -2,12 +2,15 @@ const express = require('express');
 const TelegramBot = require('node-telegram-bot-api');
 const { Redis } = require('@upstash/redis');
 const axios = require('axios');
+const https = require('https');
 const { v4: uuidv4 } = require('uuid');
 
 const app = express();
 app.use(express.json());
 
-// Инициализация Telegram Бота и Redis
+// Отключение строгого SSL для самоподписанных сертификатов панели 3x-ui
+const httpsAgent = new https.Agent({ rejectUnauthorized: false });
+
 const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
 
 const redis = new Redis({
@@ -19,52 +22,45 @@ const ADMIN_ID = String(process.env.ADMIN_ID || '');
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'AdminSuperPass2026';
 const PARTNER_PASSWORD = process.env.PARTNER_PASSWORD || 'BloggerPass2026';
 
-// Логирование ошибок бота в консоль
-bot.on('polling_error', (error) => {
-  console.error('Telegram Polling Error:', error);
-});
+const userStates = {};
 
-// Функция создания клиента в 3x-ui
+bot.on('polling_error', (error) => console.error('Telegram Error:', error.message));
+
+// Функция генерации ключа с учетом твоей ссылки панели
 async function createXuiClient(email, uuid) {
-  const host = process.env.XUI_HOST.replace(/\/$/, '');
-  const loginUrl = `${host}/login`;
+  // Настройки подключения к твоей панели
+  const baseUrl = 'https://213.176.95.147:8080/KYi7wBAUnIWNyUhgBk';
   
-  // Авторизация
-  const loginRes = await axios.post(loginUrl, {
+  // 1. Вход в панель 3x-ui
+  const loginRes = await axios.post(`${baseUrl}/login`, {
     username: process.env.XUI_USERNAME,
     password: process.env.XUI_PASSWORD
-  }, { timeout: 10000 });
+  }, { 
+    timeout: 10000,
+    httpsAgent: httpsAgent,
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+  });
 
   const cookie = loginRes.headers['set-cookie'] ? loginRes.headers['set-cookie'][0] : '';
 
-  // Добавление клиента
-  const addClientUrl = `${host}/panel/api/inbounds/addClient`;
+  // 2. Добавление клиента
   const clientData = {
     id: parseInt(process.env.XUI_INBOUND_ID || '1'),
     settings: JSON.stringify({
-      clients: [{
-        id: uuid,
-        email: email,
-        limitIp: 2,
-        totalGB: 0,
-        expiryTime: 0,
-        enable: true,
-        tgId: "",
-        subId: ""
-      }]
+      clients: [{ id: uuid, email: email, limitIp: 2, totalGB: 0, expiryTime: 0, enable: true, tgId: "", subId: "" }]
     })
   };
 
-  await axios.post(addClientUrl, clientData, {
+  await axios.post(`${baseUrl}/panel/api/inbounds/addClient`, clientData, {
     headers: { 'Cookie': cookie, 'Content-Type': 'application/json' },
+    httpsAgent: httpsAgent,
     timeout: 10000
   });
 
-  const serverDomain = new URL(host).hostname;
-  return `vless://${uuid}@${serverDomain}:443?type=tcp&security=reality&encryption=none#STROMVPN-${email}`;
+  return `vless://${uuid}@213.176.95.147:443?type=tcp&security=reality&encryption=none#STROMVPN-${email}`;
 }
 
-// Команда /start
+// /start
 bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
   const chatId = msg.chat.id;
   const userId = String(msg.from.id);
@@ -72,11 +68,8 @@ bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
 
   try {
     if (startParam) {
-      const existingRef = await redis.get(`user:${userId}:ref`);
-      if (!existingRef) {
-        await redis.set(`user:${userId}:ref`, startParam);
-        await redis.incr(`ref:${startParam}:clicks`);
-      }
+      await redis.set(`user:${userId}:ref`, startParam);
+      await redis.incr(`ref:${startParam}:clicks`);
     }
 
     const welcomeText = `👋 **Добро пожаловать в STROMVPN!**\n\n` +
@@ -87,6 +80,7 @@ bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
     const keyboard = {
       inline_keyboard: [
         [{ text: '🛒 Купить доступ (250 ₽)', callback_data: 'buy_access' }],
+        [{ text: '🎟 Ввести промокод', callback_data: 'enter_promo' }],
         [{ text: '🔑 Мои ключи', callback_data: 'my_keys' }],
         [{ text: '📊 Кабинет партнера', callback_data: 'partner_login' }],
         [{ text: '⚙️ Админ-панель', callback_data: 'admin_login' }]
@@ -95,42 +89,57 @@ bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
 
     await bot.sendMessage(chatId, welcomeText, { parse_mode: 'Markdown', reply_markup: keyboard });
   } catch (err) {
-    console.error('Error in /start:', err);
+    console.error('Error /start:', err.message);
   }
 });
 
-// Обработка нажатий на кнопки
+// Обработка сообщений (ввод промокода)
+bot.on('message', async (msg) => {
+  const chatId = msg.chat.id;
+  const userId = String(msg.from.id);
+  const text = msg.text ? msg.text.trim() : '';
+
+  if (text.startsWith('/')) return;
+
+  if (userStates[userId] === 'awaiting_promo') {
+    delete userStates[userId];
+    if (text.toUpperCase() === 'BLOGER2026') {
+      await redis.set(`user:${userId}:ref`, 'BLOGER2026');
+      await bot.sendMessage(chatId, '✅ **Промокод BLOGER2026 успешно применён!**', { parse_mode: 'Markdown' });
+    } else {
+      await bot.sendMessage(chatId, '❌ **Неверный промокод.**', { parse_mode: 'Markdown' });
+    }
+  }
+});
+
+// Кнопки
 bot.on('callback_query', async (query) => {
   const chatId = query.message.chat.id;
   const userId = String(query.from.id);
   const data = query.data;
 
-  try {
-    await bot.answerCallbackQuery(query.id);
-  } catch (e) {}
+  bot.answerCallbackQuery(query.id).catch(() => {});
 
   try {
-    if (data === 'buy_access') {
-      let userKeys = [];
-      try {
-        userKeys = (await redis.lrange(`user:${userId}:keys`, 0, -1)) || [];
-      } catch (e) {
-        console.error('Redis error:', e);
-      }
+    if (data === 'enter_promo') {
+      userStates[userId] = 'awaiting_promo';
+      await bot.sendMessage(chatId, '🎟 **Отправьте промокод сообщением в этот чат:**', { parse_mode: 'Markdown' });
+    }
 
-      if (userKeys.length >= 4) {
-        return bot.sendMessage(chatId, '❌ **Достигнут лимит:** вы не можете приобрести более 4 ключей.');
-      }
+    else if (data === 'buy_access') {
+      let activePromo = (await redis.get(`user:${userId}:ref`)) || 'Отсутствует';
 
       const payText = `💳 **ОПЛАТА ПО СБП**\n\n` +
-                      `Сумма к оплате: **250 ₽**\n\n` +
+                      `Сумма к оплате: **250 ₽**\n` +
+                      `🎟 Промокод: **${activePromo}**\n\n` +
                       `**Реквизиты:** ИП Малыгин М. Е.\n` +
                       `**Назначение:** Оплата за услуги предоставления удалённого доступа к серверу. Без НДС.\n\n` +
-                      `Переведите 250 ₽ по СБП и после перевода нажмите кнопку **«Я оплатил»** ниже.`;
+                      `Переведите 250 ₽ по СБП и нажмите **«Я оплатил»**.`;
 
       const payKeyboard = {
         inline_keyboard: [
           [{ text: '✅ Я оплатил', callback_data: 'submit_payment' }],
+          [{ text: '🎟 Ввести промокод', callback_data: 'enter_promo' }],
           [{ text: '◀️ Назад', callback_data: 'main_menu' }]
         ]
       };
@@ -140,76 +149,41 @@ bot.on('callback_query', async (query) => {
 
     else if (data === 'submit_payment') {
       const txId = uuidv4();
-      let refCode = 'DIRECT';
-      try {
-        refCode = (await redis.get(`user:${userId}:ref`)) || 'DIRECT';
-      } catch (e) {}
-
+      const refCode = (await redis.get(`user:${userId}:ref`)) || 'DIRECT';
       const username = query.from.username || 'Без_username';
       const firstName = query.from.first_name || 'Пользователь';
 
-      const txData = {
-        txId,
-        userId,
-        username,
-        firstName,
-        amount: 250,
-        status: 'pending',
-        refCode,
-        createdAt: new Date().toISOString()
-      };
+      const txData = { txId, userId, username, firstName, amount: 250, status: 'pending', refCode };
+      await redis.set(`tx:${txId}`, JSON.stringify(txData));
 
-      try {
-        await redis.set(`tx:${txId}`, JSON.stringify(txData));
-      } catch (e) {}
-
-      await bot.sendMessage(chatId, '⏳ **Ваш платеж отправлен на проверку.**\nКлюч автоматически придет вам в этот чат сразу после подтверждения.');
-
-      // Уведомление админу
-      const adminMsg = `💳 **НОВЫЙ ПЛАТЕЖ НА ПРОВЕРКУ**\n\n` +
-                       `👤 Пользователь: @${username} (${firstName})\n` +
-                       `🆔 ID: \`${userId}\`\n` +
-                       `💰 Сумма: 250 ₽\n` +
-                       `🎟 Промокод/Реф: \`${refCode}\`\n` +
-                       `🏷 ID Транзакции:\n\`${txId}\``;
-
-      const adminKeyboard = {
-        inline_keyboard: [
-          [
-            { text: '✅ Одобрить', callback_data: `approve_${txId}` },
-            { text: '❌ Отклонить', callback_data: `reject_${txId}` }
-          ]
-        ]
-      };
+      await bot.sendMessage(chatId, '⏳ **Ваш платеж отправлен на проверку.**\nКлюч придет сразу после подтверждения.');
 
       if (ADMIN_ID) {
+        const adminMsg = `💳 **НОВЫЙ ПЛАТЕЖ**\n\n👤 @${username} (${firstName})\n🆔 \`${userId}\`\n💰 250 ₽\n🎟 Промокод: \`${refCode}\`\n🏷 ID: \`${txId}\``;
+        const adminKeyboard = {
+          inline_keyboard: [[
+            { text: '✅ Одобрить', callback_data: `approve_${txId}` },
+            { text: '❌ Отклонить', callback_data: `reject_${txId}` }
+          ]]
+        };
         await bot.sendMessage(ADMIN_ID, adminMsg, { parse_mode: 'Markdown', reply_markup: adminKeyboard });
       }
     }
 
     else if (data === 'my_keys') {
-      let keys = [];
-      try {
-        keys = (await redis.lrange(`user:${userId}:keys`, 0, -1)) || [];
-      } catch (e) {}
+      let keys = (await redis.lrange(`user:${userId}:keys`, 0, -1)) || [];
+      if (keys.length === 0) return bot.sendMessage(chatId, '🔑 У вас пока нет активных ключей.');
 
-      if (keys.length === 0) {
-        return bot.sendMessage(chatId, '🔑 У вас пока нет активных ключей.');
-      }
-
-      let msg = `🔑 **Ваши активные VLESS-ключи:**\n\n`;
-      keys.forEach((k, index) => {
-        msg += `**Ключ #${index + 1}:**\n\`${k}\`\n\n`;
-      });
-
+      let msg = `🔑 **Ваши активные VLESS-ключи:**\n\n` + keys.map((k, i) => `**Ключ #${i + 1}:**\n\`${k}\``).join('\n\n');
       await bot.sendMessage(chatId, msg, { parse_mode: 'Markdown' });
     }
 
     else if (data === 'main_menu') {
-      const welcomeText = `👋 **Главное меню STROMVPN**\n\nВыберите действие ниже:`;
+      const welcomeText = `👋 **Главное меню STROMVPN**`;
       const keyboard = {
         inline_keyboard: [
           [{ text: '🛒 Купить доступ (250 ₽)', callback_data: 'buy_access' }],
+          [{ text: '🎟 Ввести промокод', callback_data: 'enter_promo' }],
           [{ text: '🔑 Мои ключи', callback_data: 'my_keys' }],
           [{ text: '📊 Кабинет партнера', callback_data: 'partner_login' }],
           [{ text: '⚙️ Админ-панель', callback_data: 'admin_login' }]
@@ -222,14 +196,11 @@ bot.on('callback_query', async (query) => {
       const txId = data.replace('approve_', '');
       const txRaw = await redis.get(`tx:${txId}`);
 
-      if (!txRaw) {
-        return bot.sendMessage(chatId, '❌ Транзакция не найдена');
-      }
-
+      if (!txRaw) return bot.sendMessage(chatId, '❌ Транзакция не найдена');
       const tx = typeof txRaw === 'string' ? JSON.parse(txRaw) : txRaw;
-      if (tx.status !== 'pending') {
-        return bot.sendMessage(chatId, '⚠️ Эта транзакция уже обработана');
-      }
+      if (tx.status !== 'pending') return bot.sendMessage(chatId, '⚠️ Уже обработано');
+
+      await bot.sendMessage(chatId, '⏳ Создаю ключ в панели 3x-ui...');
 
       tx.status = 'approved';
       await redis.set(`tx:${txId}`, JSON.stringify(tx));
@@ -246,84 +217,61 @@ bot.on('callback_query', async (query) => {
         const vlessUrl = await createXuiClient(email, clientUuid);
         await redis.rpush(`user:${tx.userId}:keys`, vlessUrl);
 
-        const userMsg = `🎉 **Ваш платеж успешно одобрен!**\n\n` +
-                        `🔑 Ваш VLESS-ключ доступа:\n\`${vlessUrl}\`\n\n` +
-                        `Скопируйте ключ и вставьте его в приложение (Happ, Streisand, v2rayNG, Nekobox и т.д.).`;
-
-        await bot.sendMessage(tx.userId, userMsg, { parse_mode: 'Markdown' });
-        await bot.sendMessage(chatId, `✅ Транзакция \`${txId}\` одобрена, ключ отправлен юзеру!`, { parse_mode: 'Markdown' });
+        await bot.sendMessage(tx.userId, `🎉 **Ваш платеж одобрен!**\n\n🔑 Ваш VLESS-ключ:\n\`${vlessUrl}\``, { parse_mode: 'Markdown' });
+        await bot.sendMessage(chatId, `✅ **Успешно!** Ключ отправлен пользователю.`, { parse_mode: 'Markdown' });
       } catch (err) {
-        console.error('XUI Error:', err);
-        await bot.sendMessage(chatId, `⚠️ Ошибка панели 3x-ui: ${err.message}`);
+        console.error('XUI Error:', err.message);
+        await bot.sendMessage(chatId, `⚠️ **Ошибка обращения к 3x-ui:** ${err.message}`);
       }
     }
 
     else if (data.startsWith('reject_')) {
       const txId = data.replace('reject_', '');
       const txRaw = await redis.get(`tx:${txId}`);
-
       if (txRaw) {
         const tx = typeof txRaw === 'string' ? JSON.parse(txRaw) : txRaw;
         tx.status = 'rejected';
         await redis.set(`tx:${txId}`, JSON.stringify(tx));
         await bot.sendMessage(tx.userId, '❌ Ваш платеж отклонен.');
       }
-      await bot.sendMessage(chatId, `❌ Транзакция \`${txId}\` отклонена.`);
+      await bot.sendMessage(chatId, `❌ Отклонено.`);
     }
 
     else if (data === 'partner_login') {
-      await bot.sendMessage(chatId, '🔒 Введите пароль партнера командой:\n`/p_pass ВАШ_ПАРОЛЬ`', { parse_mode: 'Markdown' });
+      await bot.sendMessage(chatId, '🔒 Введите:\n`/p_pass ВАШ_ПАРОЛЬ`', { parse_mode: 'Markdown' });
     }
 
     else if (data === 'admin_login') {
-      await bot.sendMessage(chatId, '🔒 Введите пароль админа командой:\n`/a_pass ВАШ_ПАРОЛЬ`', { parse_mode: 'Markdown' });
+      await bot.sendMessage(chatId, '🔒 Введите:\n`/a_pass ВАШ_ПАРОЛЬ`', { parse_mode: 'Markdown' });
     }
   } catch (err) {
-    console.error('Error in callback handler:', err);
+    console.error('Callback error:', err.message);
   }
 });
 
-// Команды авторизации
 bot.onText(/\/p_pass\s+(.+)/, async (msg, match) => {
-  const chatId = msg.chat.id;
-  const inputPass = match[1];
-
-  if (inputPass === PARTNER_PASSWORD) {
+  if (match[1] === PARTNER_PASSWORD) {
     const clicks = (await redis.get('ref:BLOGER2026:clicks')) || 0;
     const paidCount = (await redis.get('ref:BLOGER2026:paid_count')) || 0;
     const paidSum = (await redis.get('ref:BLOGER2026:paid_sum')) || 0;
-    const partnerBalance = Math.floor(paidSum * 0.5);
 
-    const partnerReport = `📊 **КАБИНЕТ ПАРТНЕРА (BLOGER2026)**\n\n` +
-                          `🖱 Переходов по ссылке: **${clicks}**\n` +
-                          `💳 Оплаченных заказов: **${paidCount}**\n` +
-                          `💰 Ваша доля (50%): **${partnerBalance} ₽**`;
-
-    await bot.sendMessage(chatId, partnerReport, { parse_mode: 'Markdown' });
+    await bot.sendMessage(msg.chat.id, `📊 **ПАРТНЕР (BLOGER2026)**\n\n🖱 Кликов: **${clicks}**\n💳 Оплат: **${paidCount}**\n💰 50%: **${Math.floor(paidSum * 0.5)} ₽**`, { parse_mode: 'Markdown' });
   } else {
-    await bot.sendMessage(chatId, '❌ Неверный пароль.');
+    await bot.sendMessage(msg.chat.id, '❌ Неверный пароль.');
   }
 });
 
 bot.onText(/\/a_pass\s+(.+)/, async (msg, match) => {
-  const chatId = msg.chat.id;
-  const inputPass = match[1];
-
-  if (inputPass === ADMIN_PASSWORD) {
+  if (match[1] === ADMIN_PASSWORD) {
     const paidCount = (await redis.get('ref:BLOGER2026:paid_count')) || 0;
     const paidSum = (await redis.get('ref:BLOGER2026:paid_sum')) || 0;
 
-    const adminReport = `⚙️ **ПАНЕЛЬ АДМИНИСТРАТОРА**\n\n` +
-                        `🎟 Промокод **BLOGER2026**:\n` +
-                        `• Оплачено шт: **${paidCount}**\n` +
-                        `• Общая сумма: **${paidSum} ₽**`;
-
-    await bot.sendMessage(chatId, adminReport, { parse_mode: 'Markdown' });
+    await bot.sendMessage(msg.chat.id, `⚙️ **АДМИН-ПАНЕЛЬ**\n\n🎟 **BLOGER2026**:\n• Оплат: **${paidCount}**\n• Сумма: **${paidSum} ₽**`, { parse_mode: 'Markdown' });
   } else {
-    await bot.sendMessage(chatId, '❌ Неверный пароль.');
+    await bot.sendMessage(msg.chat.id, '❌ Неверный пароль.');
   }
 });
 
 const PORT = process.env.PORT || 3000;
-app.get('/', (req, res) => res.send('STROMVPN Telegram Bot is Active'));
+app.get('/', (req, res) => res.send('STROMVPN Active'));
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
