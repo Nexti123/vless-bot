@@ -1,14 +1,10 @@
 const express = require('express');
 const TelegramBot = require('node-telegram-bot-api');
 const { Redis } = require('@upstash/redis');
-const axios = require('axios');
-const https = require('https');
 const { v4: uuidv4 } = require('uuid');
 
 const app = express();
 app.use(express.json());
-
-const httpsAgent = new https.Agent({ rejectUnauthorized: false });
 
 const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
 
@@ -25,89 +21,14 @@ const userStates = {};
 
 bot.on('polling_error', (error) => console.error('Telegram Error:', error.message));
 
-// Функция взаимодействия с 3x-ui (Учитывает SSL и Web Base Path)
-async function createXuiClient(email, uuid) {
-  // Гарантируем корректный базовый URL без лишних слэшей на конце
-  let rawHost = process.env.XUI_HOST.trim().replace(/\/+$/, '');
+// Генератор VLESS+WS ссылки под твои настройки из панели (ID 1)
+function generateVlessLink(email, uuid) {
+  const serverIp = process.env.SERVER_IP || '213.176.95.147';
+  const vlessPort = process.env.VLESS_PORT || '80';
+  const host = process.env.VLESS_HOST || 'time.com';
+  const path = encodeURIComponent(process.env.VLESS_PATH || '/myconnection');
 
-  // Формируем эндпоинты с сохранением Secret Path (/xkGyZFFQ2qgbIHaItu/login)
-  const loginUrl = `${rawHost}/login`;
-  const addClientUrl = `${rawHost}/panel/api/inbounds/addClient`;
-
-  const params = new URLSearchParams();
-  params.append('username', process.env.XUI_USERNAME);
-  params.append('password', process.env.XUI_PASSWORD);
-
-  // 1. Авторизация (Form-Data)
-  const loginRes = await axios.post(loginUrl, params.toString(), {
-    timeout: 12000,
-    httpsAgent: httpsAgent,
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-      'Origin': rawHost,
-      'Referer': `${rawHost}/`
-    }
-  });
-
-  if (!loginRes.data || loginRes.data.success === false) {
-    throw new Error(loginRes.data?.msg || 'Неверный логин или пароль XUI');
-  }
-
-  // Извлечение сессионной куки
-  const rawCookies = loginRes.headers['set-cookie'];
-  if (!rawCookies || rawCookies.length === 0) {
-    throw new Error('Куки не получены от панели 3x-ui');
-  }
-  const cookie = rawCookies.map(c => c.split(';')[0]).join('; ');
-
-  // 2. Добавление клиента
-  const inboundId = parseInt(process.env.XUI_INBOUND_ID || '1');
-  const clientData = {
-    id: inboundId,
-    settings: JSON.stringify({
-      clients: [{
-        id: uuid,
-        email: email,
-        limitIp: 2,
-        totalGB: 0,
-        expiryTime: 0,
-        enable: true,
-        tgId: "",
-        subId: ""
-      }]
-    })
-  };
-
-  const addRes = await axios.post(addClientUrl, clientData, {
-    timeout: 12000,
-    httpsAgent: httpsAgent,
-    headers: {
-      'Cookie': cookie,
-      'Content-Type': 'application/json'
-    }
-  });
-
-  if (addRes.data && addRes.data.success === false) {
-    throw new Error(addRes.data.msg || 'Ошибка при добавлении клиента в 3x-ui');
-  }
-
-  const serverHost = new URL(rawHost).hostname;
-  return `vless://${uuid}@${serverHost}:443?type=tcp&security=reality&encryption=none#STROMVPN-${email}`;
-}
-
-// Проверка статуса панели
-async function checkServerStatus() {
-  try {
-    let rawHost = process.env.XUI_HOST.trim().replace(/\/+$/, '');
-    const res = await axios.get(`${rawHost}/login`, {
-      timeout: 5000,
-      httpsAgent: httpsAgent
-    });
-    return res.status === 200 ? '🟢 Онлайн' : '🟡 Нестабилен';
-  } catch (err) {
-    return '🔴 Недоступен';
-  }
+  return `vless://${uuid}@${serverIp}:${vlessPort}?type=ws&security=none&path=${path}&host=${host}#STROMVPN-${email}`;
 }
 
 // /start
@@ -250,8 +171,6 @@ bot.on('callback_query', async (query) => {
       const tx = typeof txRaw === 'string' ? JSON.parse(txRaw) : txRaw;
       if (tx.status !== 'pending') return bot.sendMessage(chatId, '⚠️ Уже обработано');
 
-      await bot.sendMessage(chatId, '⏳ Создаю ключ в панели 3x-ui...');
-
       tx.status = 'approved';
       await redis.set(`tx:${txId}`, JSON.stringify(tx));
 
@@ -265,17 +184,14 @@ bot.on('callback_query', async (query) => {
 
       const clientUuid = uuidv4();
       const email = `user_${tx.userId}_${Date.now().toString().slice(-4)}`;
+      const vlessUrl = generateVlessLink(email, clientUuid);
 
-      try {
-        const vlessUrl = await createXuiClient(email, clientUuid);
-        await redis.rpush(`user:${tx.userId}:keys`, vlessUrl);
+      await redis.rpush(`user:${tx.userId}:keys`, vlessUrl);
 
-        await bot.sendMessage(tx.userId, `🎉 **Ваш платеж одобрен!**\n\n🔑 Ваш VLESS-ключ:\n\`${vlessUrl}\``, { parse_mode: 'Markdown' });
-        await bot.sendMessage(chatId, `✅ **Успешно!** Ключ отправлен пользователю.`, { parse_mode: 'Markdown' });
-      } catch (err) {
-        console.error('XUI Error:', err.message);
-        await bot.sendMessage(chatId, `⚠️ **Ошибка обращения к 3x-ui:** ${err.message}`);
-      }
+      await bot.sendMessage(tx.userId, `🎉 **Ваш платеж одобрен!**\n\n🔑 Ваш VLESS-ключ:\n\`${vlessUrl}\``, { parse_mode: 'Markdown' });
+      await bot.sendMessage(chatId, `✅ **Успешно!** Ключ отправлен пользователю.\n\n` +
+                                     `🆔 **UUID:** \`${clientUuid}\`\n` +
+                                     `📧 **Email:** \`${email}\``, { parse_mode: 'Markdown' });
     }
 
     else if (data.startsWith('reject_')) {
@@ -316,7 +232,6 @@ bot.onText(/\/p_pass\s+(.+)/, async (msg, match) => {
 
 bot.onText(/\/a_pass\s+(.+)/, async (msg, match) => {
   if (match[1] === ADMIN_PASSWORD) {
-    const serverStatus = await checkServerStatus();
     const totalSum = (await redis.get('stats:total_sum')) || 0;
     const totalSales = (await redis.get('stats:total_sales')) || 0;
     
@@ -324,7 +239,6 @@ bot.onText(/\/a_pass\s+(.+)/, async (msg, match) => {
     const blogerPaidSum = (await redis.get('ref:BLOGER2026:paid_sum')) || 0;
 
     const adminText = `⚙️ **АДМИНИСТРИРОВАНИЕ STROMVPN**\n\n` +
-                      `🌐 Status 3x-ui: **${serverStatus}**\n` +
                       `💰 Общая выручка: **${totalSum} ₽**\n` +
                       `🛒 Всего продаж: **${totalSales}**\n\n` +
                       `🎟 **Реферал BLOGER2026**:\n` +
