@@ -8,7 +8,7 @@ const { v4: uuidv4 } = require('uuid');
 const app = express();
 app.use(express.json());
 
-// Отключение строгого SSL для самоподписанных сертификатов панели 3x-ui
+// Игнорируем проблемы с SSL сертификатами
 const httpsAgent = new https.Agent({ rejectUnauthorized: false });
 
 const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
@@ -24,43 +24,72 @@ const PARTNER_PASSWORD = process.env.PARTNER_PASSWORD || 'BloggerPass2026';
 
 const userStates = {};
 
+bot.on('polling_error', (error) => console.error('Telegram Error:', error.message));
+
+// Полная авторизация и добавление клиента
 async function createXuiClient(email, uuid) {
   const baseUrl = 'https://213.176.95.147:8080/KYi7wBAUnIWNyUhgBk';
-  
-  // Передача параметров авторизации через URLSearchParams для bypass 403
-  const params = new URLSearchParams();
-  params.append('username', process.env.XUI_USERNAME);
-  params.append('password', process.env.XUI_PASSWORD);
 
-  const loginRes = await axios.post(`${baseUrl}/login`, params, { 
-    timeout: 10000,
+  // Создаем клиент Axios с заголовками браузера
+  const instance = axios.create({
+    baseURL: baseUrl,
+    timeout: 12000,
     httpsAgent: httpsAgent,
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept': 'application/json, text/plain, */*',
+      'Origin': 'https://213.176.95.147:8080',
+      'Referer': `${baseUrl}/panel/`
+    }
   });
 
-  const cookie = loginRes.headers['set-cookie'] ? loginRes.headers['set-cookie'][0] : '';
+  // 1. Запрос на вход
+  const loginRes = await instance.post('/login', {
+    username: process.env.XUI_USERNAME,
+    password: process.env.XUI_PASSWORD
+  });
 
-  if (!cookie) {
-    throw new Error('Не удалось получить Cookie (проверьте логин/пароль XUI)');
+  if (!loginRes.data || !loginRes.data.success) {
+    throw new Error(loginRes.data?.msg || 'Неверный логин или пароль XUI');
   }
 
+  // Извлекаем куки из ответа
+  const rawCookies = loginRes.headers['set-cookie'];
+  if (!rawCookies || rawCookies.length === 0) {
+    throw new Error('Куки не получены от панели');
+  }
+  const cookie = rawCookies.map(c => c.split(';')[0]).join('; ');
+
+  // 2. Добавление пользователя
+  const inboundId = parseInt(process.env.XUI_INBOUND_ID || '1');
   const clientData = {
-    id: parseInt(process.env.XUI_INBOUND_ID || '1'),
+    id: inboundId,
     settings: JSON.stringify({
-      clients: [{ id: uuid, email: email, limitIp: 2, totalGB: 0, expiryTime: 0, enable: true, tgId: "", subId: "" }]
+      clients: [{
+        id: uuid,
+        email: email,
+        limitIp: 2,
+        totalGB: 0,
+        expiryTime: 0,
+        enable: true,
+        tgId: "",
+        subId: ""
+      }]
     })
   };
 
-  await axios.post(`${baseUrl}/panel/api/inbounds/addClient`, clientData, {
-    headers: { 'Cookie': cookie, 'Content-Type': 'application/json' },
-    httpsAgent: httpsAgent,
-    timeout: 10000
+  const addRes = await instance.post('/panel/api/inbounds/addClient', clientData, {
+    headers: { 'Cookie': cookie, 'Content-Type': 'application/json' }
   });
+
+  if (addRes.data && addRes.data.success === false) {
+    throw new Error(addRes.data.msg || 'Ошибка при добавлении клиента в 3x-ui');
+  }
 
   return `vless://${uuid}@213.176.95.147:443?type=tcp&security=reality&encryption=none#STROMVPN-${email}`;
 }
 
-// /start
+// Команда /start
 bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
   const chatId = msg.chat.id;
   const userId = String(msg.from.id);
@@ -93,7 +122,7 @@ bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
   }
 });
 
-// Обработка сообщений (ввод промокода)
+// Обработка текстовых сообщений
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const userId = String(msg.from.id);
@@ -112,7 +141,7 @@ bot.on('message', async (msg) => {
   }
 });
 
-// Кнопки
+// Обработка кнопок
 bot.on('callback_query', async (query) => {
   const chatId = query.message.chat.id;
   const userId = String(query.from.id);
