@@ -68,6 +68,7 @@ bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
         [{ text: '🛒 Купить доступ (250 ₽)', callback_data: 'buy_access' }],
         [{ text: '🎟 Ввести промокод', callback_data: 'enter_promo' }],
         [{ text: '🔑 Мои ключи', callback_data: 'my_keys' }],
+        [{ text: '💬 Техподдержка', callback_data: 'support' }],
         [{ text: '📊 Кабинет партнера', callback_data: 'partner_login' }],
         [{ text: '⚙️ Админ-панель', callback_data: 'admin_login' }]
       ]
@@ -79,7 +80,7 @@ bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
   }
 });
 
-// Сообщения
+// Обработка текстовых сообщений (Промокоды и Техподдержка)
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const userId = String(msg.from.id);
@@ -87,6 +88,21 @@ bot.on('message', async (msg) => {
 
   if (text.startsWith('/')) return;
 
+  // Если пользователь пишет ответ администратору через техподдержку
+  if (userStates[userId] && userStates[userId].startsWith('support_reply_')) {
+    const targetUserId = userStates[userId].replace('support_reply_', '');
+    delete userStates[userId];
+
+    try {
+      await bot.sendMessage(targetUserId, `💬 **Ответ от техподдержки:**\n\n${text}`, { parse_mode: 'Markdown' });
+      await bot.sendMessage(chatId, '✅ **Ответ успешно отправлен пользователю!**', { parse_mode: 'Markdown' });
+    } catch (err) {
+      await bot.sendMessage(chatId, '❌ Не удалось отправить сообщение пользователю (возможно, он заблокировал бота).');
+    }
+    return;
+  }
+
+  // Если пользователь находится в режиме ввода промокода
   if (userStates[userId] === 'awaiting_promo') {
     delete userStates[userId];
     if (text.toUpperCase() === 'BLOGER2026') {
@@ -94,6 +110,36 @@ bot.on('message', async (msg) => {
       await bot.sendMessage(chatId, '✅ **Промокод BLOGER2026 успешно применён!**', { parse_mode: 'Markdown' });
     } else {
       await bot.sendMessage(chatId, '❌ **Неверный промокод.**', { parse_mode: 'Markdown' });
+    }
+    return;
+  }
+
+  // Если пользователь находится в режиме общения с техподдержкой (пишет вопрос)
+  if (userStates[userId] === 'support_chat') {
+    delete userStates[userId]; // Сбрасываем состояние, чтобы сообщения дальше шли как обычные
+
+    const username = msg.from.username || 'Без_username';
+    const firstName = msg.from.first_name || 'Пользователь';
+
+    await bot.sendMessage(chatId, '✅ **Ваше сообщение отправлено в техподдержку.** Ожидайте ответ!');
+
+    if (ADMIN_ID) {
+      const supportMsg = `💬 **ВОПРОС В ПОДДЕРЖКУ**\n\n` +
+                         `👤 От: @${username} (${firstName})\n` +
+                         `🆔 ID: \`${userId}\`\n\n` +
+                         `📝 **Текст:**\n${text}`;
+
+      const supportKeyboard = {
+        inline_keyboard: [[
+          { text: '✍️ Ответить', callback_data: `reply_support_${userId}` }
+        ]]
+      };
+
+      try {
+        await bot.sendMessage(ADMIN_ID, supportMsg, { parse_mode: 'Markdown', reply_markup: supportKeyboard });
+      } catch (err) {
+        console.error('⚠️ Ошибка отправки сообщения техподдержки админу:', err.message);
+      }
     }
   }
 });
@@ -107,7 +153,23 @@ bot.on('callback_query', async (query) => {
   bot.answerCallbackQuery(query.id).catch(() => {});
 
   try {
-    if (data === 'enter_promo') {
+    if (data === 'support') {
+      userStates[userId] = 'support_chat';
+      const supportText = `💬 **Служба технической поддержки**\n\n` +
+                          `Опишите вашу проблему или задайте вопрос следующим сообщением в этот чат, и администратор ответит вам в ближайшее время.`;
+      const backKeyboard = {
+        inline_keyboard: [[{ text: '◀️ В главное меню', callback_data: 'main_menu' }]]
+      };
+      await bot.sendMessage(chatId, supportText, { parse_mode: 'Markdown', reply_markup: backKeyboard });
+    }
+
+    else if (data.startsWith('reply_support_')) {
+      const targetUserId = data.replace('reply_support_', '');
+      userStates[userId] = `support_reply_${targetUserId}`;
+      await bot.sendMessage(chatId, '✍️ **Введите ответ пользователю сообщением в этот чат:**', { parse_mode: 'Markdown' });
+    }
+
+    else if (data === 'enter_promo') {
       userStates[userId] = 'awaiting_promo';
       await bot.sendMessage(chatId, '🎟 **Отправьте промокод сообщением в этот чат:**', { parse_mode: 'Markdown' });
     }
@@ -152,7 +214,11 @@ bot.on('callback_query', async (query) => {
             { text: '❌ Отклонить', callback_data: `reject_${txId}` }
           ]]
         };
-        await bot.sendMessage(ADMIN_ID, adminMsg, { parse_mode: 'Markdown', reply_markup: adminKeyboard });
+        try {
+          await bot.sendMessage(ADMIN_ID, adminMsg, { parse_mode: 'Markdown', reply_markup: adminKeyboard });
+        } catch (err) {
+          console.error('⚠️ Ошибка отправки уведомления админу:', err.message);
+        }
       }
     }
 
@@ -165,12 +231,14 @@ bot.on('callback_query', async (query) => {
     }
 
     else if (data === 'main_menu') {
+      delete userStates[userId];
       const welcomeText = `👋 **Главное меню STROMVPN**`;
       const keyboard = {
         inline_keyboard: [
           [{ text: '🛒 Купить доступ (250 ₽)', callback_data: 'buy_access' }],
           [{ text: '🎟 Ввести промокод', callback_data: 'enter_promo' }],
           [{ text: '🔑 Мои ключи', callback_data: 'my_keys' }],
+          [{ text: '💬 Техподдержка', callback_data: 'support' }],
           [{ text: '📊 Кабинет партнера', callback_data: 'partner_login' }],
           [{ text: '⚙️ Админ-панель', callback_data: 'admin_login' }]
         ]
