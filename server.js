@@ -24,18 +24,15 @@ const PARTNER_PASSWORD = process.env.PARTNER_PASSWORD || 'BloggerPass2026';
 
 const userStates = {};
 
-bot.on('polling_error', (error) => console.error('Telegram Error:', error.message));
-
-// Функция генерации ключа с учетом твоей ссылки панели
 async function createXuiClient(email, uuid) {
-  // Настройки подключения к твоей панели
   const baseUrl = 'https://213.176.95.147:8080/KYi7wBAUnIWNyUhgBk';
   
-  // 1. Вход в панель 3x-ui
-  const loginRes = await axios.post(`${baseUrl}/login`, {
-    username: process.env.XUI_USERNAME,
-    password: process.env.XUI_PASSWORD
-  }, { 
+  // Передача параметров авторизации через URLSearchParams для bypass 403
+  const params = new URLSearchParams();
+  params.append('username', process.env.XUI_USERNAME);
+  params.append('password', process.env.XUI_PASSWORD);
+
+  const loginRes = await axios.post(`${baseUrl}/login`, params, { 
     timeout: 10000,
     httpsAgent: httpsAgent,
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
@@ -43,7 +40,10 @@ async function createXuiClient(email, uuid) {
 
   const cookie = loginRes.headers['set-cookie'] ? loginRes.headers['set-cookie'][0] : '';
 
-  // 2. Добавление клиента
+  if (!cookie) {
+    throw new Error('Не удалось получить Cookie (проверьте логин/пароль XUI)');
+  }
+
   const clientData = {
     id: parseInt(process.env.XUI_INBOUND_ID || '1'),
     settings: JSON.stringify({
