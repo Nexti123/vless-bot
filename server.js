@@ -107,13 +107,10 @@ app.post('/api/init', async (req, res) => {
   const { initData, ref } = req.body;
   const user = verifyTelegramWebAppData(initData);
   
-  if (!user) {
-    return res.status(401).json({ error: 'Неверные данные Telegram API' });
-  }
+  // Если зашли из обычного браузера (без initData), даем тестовый доступ
+  const userId = user ? user.id : 'test_browser_user';
 
-  const userId = user.id;
-
-  // Закрепляем реферал намертво, если еще не был закреплен
+  // Закрепляем реферал намертво
   if (ref && ref === 'BLOGER2026') {
     const existingRef = await redis.get(`user:${userId}:ref`);
     if (!existingRef) {
@@ -125,7 +122,7 @@ app.post('/api/init', async (req, res) => {
   const userKeys = await redis.lrange(`user:${userId}:keys`, 0, -1) || [];
   
   res.json({
-    user,
+    user: user || { id: 'test_browser_user', first_name: 'Гость' },
     keysCount: userKeys.length,
     canBuy: userKeys.length < 4
   });
