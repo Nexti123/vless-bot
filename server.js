@@ -1,89 +1,51 @@
-require('dotenv').config();
 const express = require('express');
-const path = require('path');
-const crypto = require('crypto');
-const { v4: uuidv4 } = require('uuid');
-const { Redis } = require('@upstash/redis');
 const TelegramBot = require('node-telegram-bot-api');
+const { Redis } = require('@upstash/redis');
 const axios = require('axios');
+const { v4: uuidv4 } = require('uuid');
 
 const app = express();
 app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
 
-// Инициализация Upstash Redis
+// 1. Инициализация переменных окружения
+const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
+
 const redis = new Redis({
   url: process.env.UPSTASH_REDIS_REST_URL,
   token: process.env.UPSTASH_REDIS_REST_TOKEN,
 });
 
-// Инициализация Telegram Бота
-const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
+const ADMIN_ID = process.env.ADMIN_ID;
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+const PARTNER_PASSWORD = process.env.PARTNER_PASSWORD;
 
-// ------------------------------------------------------------------
-// ВАЛИДАЦИЯ TELEGRAM WEBAPP INITDATA
-// ------------------------------------------------------------------
-function verifyTelegramWebAppData(initData) {
-  if (!initData) return null;
-  const urlParams = new URLSearchParams(initData);
-  const hash = urlParams.get('hash');
-  urlParams.delete('hash');
-
-  const paramsToSign = Array.from(urlParams.entries())
-    .map(([key, val]) => `${key}=${val}`)
-    .sort()
-    .join('\n');
-
-  const secretKey = crypto.createHmac('sha256', 'WebAppData')
-    .update(process.env.TELEGRAM_BOT_TOKEN)
-    .digest();
-
-  const calculatedHash = crypto.createHmac('sha256', secretKey)
-    .update(paramsToSign)
-    .digest('hex');
-
-  if (calculatedHash === hash) {
-    const userStr = urlParams.get('user');
-    return userStr ? JSON.parse(userStr) : null;
-  }
-  return null;
-}
-
-// ------------------------------------------------------------------
-// ИНТЕГРАЦИЯ С ПАНЕЛЬЮ 3X-UI
-// ------------------------------------------------------------------
-async function generate3xUiKey(clientTgId, username) {
-  const host = process.env.XUI_HOST;
+// 2. Вспомогательная функция для взаимодействия с 3x-ui
+async function createXuiClient(email, uuid) {
+  const host = process.env.XUI_HOST.replace(/\/$/, '');
   const loginUrl = `${host}/login`;
   
-  // 1. Авторизация в панели
-  const authRes = await axios.post(loginUrl, {
+  // Авторизация в 3x-ui
+  const loginRes = await axios.post(loginUrl, {
     username: process.env.XUI_USERNAME,
     password: process.env.XUI_PASSWORD
-  }, {
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
   });
 
-  const cookie = authRes.headers['set-cookie'];
-  const clientUuid = uuidv4();
-  const clientEmail = `user_${clientTgId}_${Date.now()}`;
+  const cookie = loginRes.headers['set-cookie'] ? loginRes.headers['set-cookie'][0] : '';
 
-  // 2. Добавление клиента в инбаунд STROMVPN
-  const inboundId = parseInt(process.env.XUI_INBOUND_ID || '1');
+  // Добавление клиентов в inbound
   const addClientUrl = `${host}/panel/api/inbounds/addClient`;
-  
   const clientData = {
-    id: inboundId,
+    id: parseInt(process.env.XUI_INBOUND_ID),
     settings: JSON.stringify({
       clients: [{
-        id: clientUuid,
-        email: clientEmail,
-        flow: "xtls-rprx-vision",
+        id: uuid,
+        email: email,
         limitIp: 2,
         totalGB: 0,
-        expiryTime: Date.now() + (30 * 24 * 60 * 60 * 1000), // 30 дней
+        expiryTime: 0,
         enable: true,
-        tgId: String(clientTgId)
+        tgId: "",
+        subId: ""
       }]
     })
   };
@@ -92,230 +54,256 @@ async function generate3xUiKey(clientTgId, username) {
     headers: { 'Cookie': cookie, 'Content-Type': 'application/json' }
   });
 
-  // В реальных условиях URL генерируется по параметрам инбаунда панели.
-  // Ниже приведен стандартный шаблон для VLESS-Reality 3x-ui:
-  const vlessKey = `vless://${clientUuid}@213.176.95.147:443?type=tcp&security=reality&pbk=STROMVPN_KEY&fp=chrome&sni=yahoo.com&sid=123456#STROMVPN-${username || clientTgId}`;
-  return vlessKey;
+  // Формирование ссылки VLESS
+  const serverDomain = new URL(host).hostname;
+  return `vless://${uuid}@${serverDomain}:443?type=tcp&security=reality&encryption=none#STROMVPN-${email}`;
 }
 
-// ------------------------------------------------------------------
-// API ENDPOINTS
-// ------------------------------------------------------------------
+// 3. Команда /start и Реферальная система
+bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const userId = msg.from.id;
+  const startParam = match ? match[1] : null;
 
-// Регистрация/проверка реферала и количества ключей юзера
-app.post('/api/init', async (req, res) => {
-  const { initData, ref } = req.body;
-  const user = verifyTelegramWebAppData(initData);
-  
-  // Если зашли из обычного браузера (без initData), даем тестовый доступ
-  const userId = user ? user.id : 'test_browser_user';
-
-  // Закрепляем реферал намертво
-  if (ref && ref === 'BLOGER2026') {
+  // Если зашли по реф-ссылке (например: /start BLOGER2026)
+  if (startParam) {
     const existingRef = await redis.get(`user:${userId}:ref`);
     if (!existingRef) {
-      await redis.set(`user:${userId}:ref`, 'BLOGER2026');
+      await redis.set(`user:${userId}:ref`, startParam);
+      // Увеличиваем счетчик переходов для блогера
+      await redis.incr(`ref:${startParam}:clicks`);
     }
   }
 
-  // Считаем количество активных ключей юзера
-  const userKeys = await redis.lrange(`user:${userId}:keys`, 0, -1) || [];
-  
-  res.json({
-    user: user || { id: 'test_browser_user', first_name: 'Гость' },
-    keysCount: userKeys.length,
-    canBuy: userKeys.length < 4
-  });
-});
+  const welcomeText = `👋 **Добро пожаловать в STROMVPN!**\n\n` +
+                      `⚡ Скоростной и защищенный VLESS-прокси канал.\n` +
+                      `💳 Стоимость: **250 ₽ / 30 дней**\n\n` +
+                      `Выберите действие в меню ниже:`;
 
-// Запрос на оплату
-app.post('/api/buy', async (req, res) => {
-  const { initData } = req.body;
-  const user = verifyTelegramWebAppData(initData);
-  
-  if (!user) {
-    return res.status(401).json({ error: 'Ошибка проверки авторизации Telegram' });
-  }
-
-  const userId = user.id;
-  const userKeys = await redis.lrange(`user:${userId}:keys`, 0, -1) || [];
-
-  if (userKeys.length >= 4) {
-    return res.status(400).json({ error: 'Достигнут лимит: максимум 4 активных ключа.' });
-  }
-
-  const txId = uuidv4();
-  const refCode = (await redis.get(`user:${userId}:ref`)) || 'DIRECT';
-
-  const txData = {
-    txId,
-    userId,
-    username: user.username || 'Без_username',
-    firstName: user.first_name || 'Пользователь',
-    amount: 250,
-    status: 'pending',
-    refCode,
-    createdAt: new Date().toISOString()
+  const keyboard = {
+    inline_keyboard: [
+      [{ text: '🛒 Купить доступ (250 ₽)', callback_data: 'buy_access' }],
+      [{ text: '🔑 Мои ключи', callback_data: 'my_keys' }],
+      [{ text: '📊 Кабинет партнера', callback_data: 'partner_login' }],
+      [{ text: '⚙️ Админ-панель', callback_data: 'admin_login' }]
+    ]
   };
 
-  await redis.set(`tx:${txId}`, JSON.stringify(txData));
+  bot.sendMessage(chatId, welcomeText, { parse_mode: 'Markdown', reply_markup: keyboard });
+});
 
-  // Отправка уведомления администратору в ТГ
-  const msg = `💳 **НОВЫЙ ПЛАТЕЖ НА ПРОВЕРКУ**\n\n` +
-              `👤 Пользователь: @${txData.username} (${txData.firstName})\n` +
-              `🆔 ID: \`${txData.userId}\`\n` +
-              `💰 Сумма: 250 ₽\n` +
-              `🎟 Промокод: \`${refCode}\`\n` +
-              `🏷 Transaction ID:\n\`${txId}\``;
+// 4. Обработка нажатий на инлайн-кнопки
+bot.on('callback_query', async (query) => {
+  const chatId = query.message.chat.id;
+  const userId = query.from.id;
+  const data = query.data;
 
-  await bot.sendMessage(process.env.ADMIN_ID, msg, {
-    parse_mode: 'Markdown',
-    reply_markup: {
+  // Очищаем анимацию загрузки кнопки
+  bot.answerCallbackQuery(query.id);
+
+  if (data === 'buy_access') {
+    // Проверка лимита (макс 4 ключа)
+    const userKeys = await redis.lrange(`user:${userId}:keys`, 0, -1) || [];
+    if (userKeys.length >= 4) {
+      return bot.sendMessage(chatId, '❌ **Достигнут лимит:** вы не можете приобрести более 4 ключей.');
+    }
+
+    const payText = `💳 **ОПЛАТА ПО СБП**\n\n` +
+                    `Сумма к оплате: **250 ₽**\n\n` +
+                    `**Реквизиты:** ИП Малыгин М. Е.\n` +
+                    `**Назначение:** Оплата за услуги предоставления удалённого доступа к серверу. Без НДС.\n\n` +
+                    `Переведите 250 ₽ по СБП и после перевода нажмите кнопку **«Я оплатил»** ниже.`;
+
+    const payKeyboard = {
+      inline_keyboard: [
+        [{ text: '✅ Я оплатил', callback_data: 'submit_payment' }],
+        [{ text: '◀️ Назад', callback_data: 'main_menu' }]
+      ]
+    };
+
+    bot.sendMessage(chatId, payText, { parse_mode: 'Markdown', reply_markup: payKeyboard });
+  }
+
+  else if (data === 'submit_payment') {
+    const txId = uuidv4();
+    const refCode = (await redis.get(`user:${userId}:ref`)) || 'DIRECT';
+    const username = query.from.username || 'Без_username';
+    const firstName = query.from.first_name || 'Пользователь';
+
+    const txData = {
+      txId,
+      userId,
+      username,
+      firstName,
+      amount: 250,
+      status: 'pending',
+      refCode,
+      createdAt: new Date().toISOString()
+    };
+
+    await redis.set(`tx:${txId}`, JSON.stringify(txData));
+
+    bot.sendMessage(chatId, '⏳ **Ваш платеж отправлен на проверку.**\nКлюч автоматически придет вам в этот чат сразу после подтверждения.');
+
+    // Уведомление админу
+    const adminMsg = `💳 **НОВЫЙ ПЛАТЕЖ НА ПРОВЕРКУ**\n\n` +
+                     `👤 Пользователь: @${username} (${firstName})\n` +
+                     `🆔 ID: \`${userId}\`\n` +
+                     `💰 Сумма: 250 ₽\n` +
+                     `🎟 Промокод/Реф: \`${refCode}\`\n` +
+                     `🏷 ID Транзакции:\n\`${txId}\``;
+
+    const adminKeyboard = {
       inline_keyboard: [
         [
-          { text: '✅ Одобрить оплату', callback_data: `approve_${txId}` },
+          { text: '✅ Одобрить', callback_data: `approve_${txId}` },
           { text: '❌ Отклонить', callback_data: `reject_${txId}` }
         ]
       ]
-    }
-  });
+    };
 
-  res.json({ success: true, txId });
-});
-
-// Авторизация Блогера
-app.post('/api/partner/login', async (req, res) => {
-  const { password } = req.body;
-  if (password !== process.env.PARTNER_PASSWORD) {
-    return res.status(403).json({ error: 'Неверный пароль партнера' });
+    bot.sendMessage(ADMIN_ID, adminMsg, { parse_mode: 'Markdown', reply_markup: adminKeyboard });
   }
 
-  // Сбор статистики по промокоду BLOGER2026
-  const keys = await redis.keys('tx:*');
-  let totalPayments = 0;
-  let paidCount = 0;
-  let refUsersSet = new Set();
-
-  for (const key of keys) {
-    const tx = await redis.get(key);
-    if (tx && tx.refCode === 'BLOGER2026') {
-      refUsersSet.add(tx.userId);
-      if (tx.status === 'approved') {
-        paidCount++;
-        totalPayments += 250;
-      }
+  else if (data === 'my_keys') {
+    const keys = await redis.lrange(`user:${userId}:keys`, 0, -1) || [];
+    if (keys.length === 0) {
+      return bot.sendMessage(chatId, '🔑 У вас пока нет активных ключей.');
     }
+
+    let msg = `🔑 **Ваши активные VLESS-ключи:**\n\n`;
+    keys.forEach((k, index) => {
+      msg += `**Ключ #${index + 1}:**\n\`${k}\`\n\n`;
+    });
+
+    bot.sendMessage(chatId, msg, { parse_mode: 'Markdown' });
   }
 
-  const partnerBalance = paidCount * 125; // 50% комиссии
-
-  res.json({
-    success: true,
-    stats: {
-      totalRefs: refUsersSet.size,
-      paidCount,
-      partnerBalance
-    }
-  });
-});
-
-// Авторизация Админа и получение истории
-app.post('/api/admin/login', async (req, res) => {
-  const { password } = req.body;
-  if (password !== process.env.ADMIN_PASSWORD) {
-    return res.status(403).json({ error: 'Неверный пароль администратора' });
+  else if (data === 'main_menu') {
+    const welcomeText = `👋 **Главное меню STROMVPN**\n\nВыберите действие ниже:`;
+    const keyboard = {
+      inline_keyboard: [
+        [{ text: '🛒 Купить доступ (250 ₽)', callback_data: 'buy_access' }],
+        [{ text: '🔑 Мои ключи', callback_data: 'my_keys' }],
+        [{ text: '📊 Кабинет партнера', callback_data: 'partner_login' }],
+        [{ text: '⚙️ Админ-панель', callback_data: 'admin_login' }]
+      ]
+    };
+    bot.sendMessage(chatId, welcomeText, { parse_mode: 'Markdown', reply_markup: keyboard });
   }
 
-  const keys = await redis.keys('tx:*');
-  let transactions = [];
-  let blogerCount = 0;
-  let blogerSum = 0;
-
-  for (const key of keys) {
-    const tx = await redis.get(key);
-    if (tx) {
-      transactions.push(tx);
-      if (tx.refCode === 'BLOGER2026' && tx.status === 'approved') {
-        blogerCount++;
-        blogerSum += tx.amount;
-      }
-    }
-  }
-
-  // Сортировка по дате (свежие сверху)
-  transactions.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-
-  res.json({
-    success: true,
-    blogerStats: { count: blogerCount, sum: blogerSum },
-    transactions
-  });
-});
-
-// ------------------------------------------------------------------
-// ОБРАБОТКА ИНЛАЙН-КНОПОК ТЕЛЕГРАМ АДМИНА
-// ------------------------------------------------------------------
-bot.on('callback_query', async (query) => {
-  const data = query.data;
-  const chatId = query.message.chat.id;
-  const messageId = query.message.message_id;
-
-  if (data.startsWith('approve_')) {
+  else if (data.startsWith('approve_')) {
     const txId = data.replace('approve_', '');
     const txRaw = await redis.get(`tx:${txId}`);
 
-    if (!txRaw) return bot.answerCallbackQuery(query.id, { text: 'Транзакция не найдена' });
-    const tx = typeof txRaw === 'string' ? JSON.parse(txRaw) : txRaw;
+    if (!txRaw) {
+      return bot.sendMessage(chatId, '❌ Транзакция не найдена');
+    }
 
-    if (tx.status === 'approved') {
-      return bot.answerCallbackQuery(query.id, { text: 'Уже одобрено!' });
+    const tx = typeof txRaw === 'string' ? JSON.parse(txRaw) : txRaw;
+    if (tx.status !== 'pending') {
+      return bot.sendMessage(chatId, '⚠️ Эта транзакция уже обработана');
     }
 
     tx.status = 'approved';
     await redis.set(`tx:${txId}`, JSON.stringify(tx));
 
-    try {
-      // Генерация ключа в 3x-ui
-      const vlessKey = await generate3xUiKey(tx.userId, tx.username);
-      await redis.lpush(`user:${tx.userId}:keys`, vlessKey);
+    // Добавляем запись в список транзакций
+    await redis.lpush('all_transactions', JSON.stringify(tx));
 
-      // Отправка в ЛС клиенту
-      await bot.sendMessage(tx.userId, 
-        `🎉 **Оплата подтверждена!**\n\nВаш защищенный прокси-канал готов к работе:\n\n\`${vlessKey}\`\n\n Скопируйте ключ и вставьте в v2rayNG, Happ или Streisand.`,
-        { parse_mode: 'Markdown' }
-      );
-
-      await bot.editMessageText(query.message.text + `\n\n✅ **ОДОБРЕНО**`, {
-        chat_id: chatId,
-        message_id: messageId
-      });
-      bot.answerCallbackQuery(query.id, { text: 'Оплата одобрена, ключ выслан!' });
-    } catch (err) {
-      console.error('Ошибка 3x-ui:', err);
-      bot.sendMessage(process.env.ADMIN_ID, `⚠️ Ошибка при создании ключа в 3x-ui: ${err.message}`);
+    // Начисление партнеру (если есть)
+    if (tx.refCode && tx.refCode !== 'DIRECT') {
+      await redis.incrby(`ref:${tx.refCode}:paid_sum`, 250);
+      await redis.incr(`ref:${tx.refCode}:paid_count`);
     }
 
-  } else if (data.startsWith('reject_')) {
+    // Генерация VLESS ключа
+    const clientUuid = uuidv4();
+    const email = `user_${tx.userId}_${Date.now().toString().slice(-4)}`;
+
+    try {
+      const vlessUrl = await createXuiClient(email, clientUuid);
+      await redis.rpush(`user:${tx.userId}:keys`, vlessUrl);
+
+      // Уведомление пользователю
+      const userMsg = `🎉 **Ваш платеж успешно одобрен!**\n\n` +
+                      `🔑 Ваш VLESS-ключ доступа:\n\`${vlessUrl}\`\n\n` +
+                      `Скопируйте ключ и вставьте его в ваше приложение (v2rayNG, Happ, Streisand, Nekobox и т.д.).`;
+
+      bot.sendMessage(tx.userId, userMsg, { parse_mode: 'Markdown' });
+      bot.sendMessage(ADMIN_ID, `✅ Транзакция \`${txId}\` успешно одобрена, ключ отправлен!`, { parse_mode: 'Markdown' });
+    } catch (err) {
+      console.error(err);
+      bot.sendMessage(ADMIN_ID, `⚠️ Ошибка при создании VLESS ключа в 3x-ui: ${err.message}`);
+    }
+  }
+
+  else if (data.startsWith('reject_')) {
     const txId = data.replace('reject_', '');
     const txRaw = await redis.get(`tx:${txId}`);
+
     if (txRaw) {
       const tx = typeof txRaw === 'string' ? JSON.parse(txRaw) : txRaw;
       tx.status = 'rejected';
       await redis.set(`tx:${txId}`, JSON.stringify(tx));
-
-      await bot.sendMessage(tx.userId, `❌ Ваш платеж не был подтвержден бухгалтерией. Попробуйте снова или свяжитесь с поддержкой.`);
+      bot.sendMessage(tx.userId, '❌ Ваш платеж отклонен. Если возникли вопросы, свяжитесь с поддержкой.');
     }
+    bot.sendMessage(ADMIN_ID, `❌ Транзакция \`${txId}\` отклонена.`);
+  }
 
-    await bot.editMessageText(query.message.text + `\n\n❌ **ОТКЛОНЕНО**`, {
-      chat_id: chatId,
-      message_id: messageId
-    });
-    bot.answerCallbackQuery(query.id, { text: 'Платеж отклонен' });
+  else if (data === 'partner_login') {
+    bot.sendMessage(chatId, '🔒 Введите пароль партнера командой:\n`/p_pass ВАШ_ПАРОЛЬ`', { parse_mode: 'Markdown' });
+  }
+
+  else if (data === 'admin_login') {
+    bot.sendMessage(chatId, '🔒 Введите пароль админа командой:\n`/a_pass ВАШ_ПАРОЛЬ`', { parse_mode: 'Markdown' });
   }
 });
 
-// Запуск сервера
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server launched on port ${PORT}`);
+// 5. Авторизация Партнера через команду /p_pass
+bot.onText(/\/p_pass\s+(.+)/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const inputPass = match[1];
+
+  if (inputPass === PARTNER_PASSWORD) {
+    const clicks = (await redis.get('ref:BLOGER2026:clicks')) || 0;
+    const paidCount = (await redis.get('ref:BLOGER2026:paid_count')) || 0;
+    const paidSum = (await redis.get('ref:BLOGER2026:paid_sum')) || 0;
+    const partnerBalance = Math.floor(paidSum * 0.5); // 50%
+
+    const partnerReport = `📊 **КАБИНЕТ ПАРТНЕРА (BLOGER2026)**\n\n` +
+                          `🖱 Переходов по ссылке: **${clicks}**\n` +
+                          `💳 Оплаченных заказов: **${paidCount}**\n` +
+                          `💰 Ваша доля (50%): **${partnerBalance} ₽**`;
+
+    bot.sendMessage(chatId, partnerReport, { parse_mode: 'Markdown' });
+  } else {
+    bot.sendMessage(chatId, '❌ Неверный пароль партнера.');
+  }
 });
+
+// 6. Авторизация Админа через команду /a_pass
+bot.onText(/\/a_pass\s+(.+)/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const inputPass = match[1];
+
+  if (inputPass === ADMIN_PASSWORD) {
+    const paidCount = (await redis.get('ref:BLOGER2026:paid_count')) || 0;
+    const paidSum = (await redis.get('ref:BLOGER2026:paid_sum')) || 0;
+
+    const adminReport = `⚙️ **ПАНЕЛЬ АДМИНИСТРАТОРА**\n\n` +
+                        `🎟 Промокод **BLOGER2026**:\n` +
+                        `• Оплачено шт: **${paidCount}**\n` +
+                        `• Общая сумма: **${paidSum} ₽**\n\n` +
+                        `Вы можете просмотреть историю транзакций или управлять запросами прямо из уведомлений бота.`;
+
+    bot.sendMessage(chatId, adminReport, { parse_mode: 'Markdown' });
+  } else {
+    bot.sendMessage(chatId, '❌ Неверный пароль админа.');
+  }
+});
+
+// Запуск HTTP-сервера для Render
+const PORT = process.env.PORT || 3000;
+app.get('/', (req, res) => res.send('STROMVPN Telegram Bot is Active'));
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
