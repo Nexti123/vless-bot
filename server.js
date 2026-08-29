@@ -28,23 +28,23 @@ bot.on('polling_error', (error) => console.error('Telegram Error:', error.messag
 
 // Функция взаимодействия с 3x-ui
 async function createXuiClient(email, uuid) {
-  // Берем полную ссылку из XUI_HOST (настроена в Render)
-  const baseUrl = process.env.XUI_HOST.replace(/\/$/, '');
+  // Берем URL из Render (например, https://213.176.95.147:8080/KYi7wBAUnIWNyUhgBk)
+  let rawHost = process.env.XUI_HOST.replace(/\/$/, '');
 
   const instance = axios.create({
-    baseURL: baseUrl,
+    baseURL: rawHost,
     timeout: 12000,
     httpsAgent: httpsAgent,
     headers: {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       'Accept': 'application/json, text/plain, */*',
-      'Origin': baseUrl,
-      'Referer': `${baseUrl}/panel/`
+      'Origin': rawHost,
+      'Referer': `${rawHost}/`
     }
   });
 
-  // 1. Авторизация
-  const loginRes = await instance.post('/login', {
+  // 1. Авторизация (используем относительный путь './login', чтобы сохранять Secret Path)
+  const loginRes = await instance.post('./login', {
     username: process.env.XUI_USERNAME,
     password: process.env.XUI_PASSWORD
   });
@@ -78,7 +78,7 @@ async function createXuiClient(email, uuid) {
     })
   };
 
-  const addRes = await instance.post('/panel/api/inbounds/addClient', clientData, {
+  const addRes = await instance.post('./panel/api/inbounds/addClient', clientData, {
     headers: { 'Cookie': cookie, 'Content-Type': 'application/json' }
   });
 
@@ -86,8 +86,8 @@ async function createXuiClient(email, uuid) {
     throw new Error(addRes.data.msg || 'Ошибка при добавлении клиента в 3x-ui');
   }
 
-  // Получаем домен/IP для формирования ссылки VLESS
-  const serverHost = new URL(baseUrl).hostname;
+  // Извлекаем чистый хост/IP для ссылки VLESS
+  const serverHost = new URL(rawHost).hostname;
   return `vless://${uuid}@${serverHost}:443?type=tcp&security=reality&encryption=none#STROMVPN-${email}`;
 }
 
