@@ -8,7 +8,6 @@ const { v4: uuidv4 } = require('uuid');
 const app = express();
 app.use(express.json());
 
-// Отключение проверки SSL-сертификатов для взаимодействия с 3x-ui
 const httpsAgent = new https.Agent({ rejectUnauthorized: false });
 
 const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
@@ -26,41 +25,43 @@ const userStates = {};
 
 bot.on('polling_error', (error) => console.error('Telegram Error:', error.message));
 
-// Функция взаимодействия с 3x-ui
+// Функция взаимодействия с 3x-ui (Учитывает SSL и Web Base Path)
 async function createXuiClient(email, uuid) {
-  // Берем URL из Render (например, https://213.176.95.147:8080/KYi7wBAUnIWNyUhgBk)
-  let rawHost = process.env.XUI_HOST.replace(/\/$/, '');
+  // Гарантируем корректный базовый URL без лишних слэшей на конце
+  let rawHost = process.env.XUI_HOST.trim().replace(/\/+$/, '');
 
-  const instance = axios.create({
-    baseURL: rawHost,
+  // Формируем эндпоинты с сохранением Secret Path (/xkGyZFFQ2qgbIHaItu/login)
+  const loginUrl = `${rawHost}/login`;
+  const addClientUrl = `${rawHost}/panel/api/inbounds/addClient`;
+
+  const params = new URLSearchParams();
+  params.append('username', process.env.XUI_USERNAME);
+  params.append('password', process.env.XUI_PASSWORD);
+
+  // 1. Авторизация (Form-Data)
+  const loginRes = await axios.post(loginUrl, params.toString(), {
     timeout: 12000,
     httpsAgent: httpsAgent,
     headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'Accept': 'application/json, text/plain, */*',
+      'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
       'Origin': rawHost,
       'Referer': `${rawHost}/`
     }
   });
 
-  // 1. Авторизация (используем относительный путь './login', чтобы сохранять Secret Path)
-  const loginRes = await instance.post('./login', {
-    username: process.env.XUI_USERNAME,
-    password: process.env.XUI_PASSWORD
-  });
-
-  if (!loginRes.data || !loginRes.data.success) {
+  if (!loginRes.data || loginRes.data.success === false) {
     throw new Error(loginRes.data?.msg || 'Неверный логин или пароль XUI');
   }
 
-  // Извлечение куки сессии
+  // Извлечение сессионной куки
   const rawCookies = loginRes.headers['set-cookie'];
   if (!rawCookies || rawCookies.length === 0) {
-    throw new Error('Куки не получены от панели');
+    throw new Error('Куки не получены от панели 3x-ui');
   }
   const cookie = rawCookies.map(c => c.split(';')[0]).join('; ');
 
-  // 2. Добавление клиента в inbound
+  // 2. Добавление клиента
   const inboundId = parseInt(process.env.XUI_INBOUND_ID || '1');
   const clientData = {
     id: inboundId,
@@ -78,17 +79,35 @@ async function createXuiClient(email, uuid) {
     })
   };
 
-  const addRes = await instance.post('./panel/api/inbounds/addClient', clientData, {
-    headers: { 'Cookie': cookie, 'Content-Type': 'application/json' }
+  const addRes = await axios.post(addClientUrl, clientData, {
+    timeout: 12000,
+    httpsAgent: httpsAgent,
+    headers: {
+      'Cookie': cookie,
+      'Content-Type': 'application/json'
+    }
   });
 
   if (addRes.data && addRes.data.success === false) {
     throw new Error(addRes.data.msg || 'Ошибка при добавлении клиента в 3x-ui');
   }
 
-  // Извлекаем чистый хост/IP для ссылки VLESS
   const serverHost = new URL(rawHost).hostname;
   return `vless://${uuid}@${serverHost}:443?type=tcp&security=reality&encryption=none#STROMVPN-${email}`;
+}
+
+// Проверка статуса панели
+async function checkServerStatus() {
+  try {
+    let rawHost = process.env.XUI_HOST.trim().replace(/\/+$/, '');
+    const res = await axios.get(`${rawHost}/login`, {
+      timeout: 5000,
+      httpsAgent: httpsAgent
+    });
+    return res.status === 200 ? '🟢 Онлайн' : '🟡 Нестабилен';
+  } catch (err) {
+    return '🔴 Недоступен';
+  }
 }
 
 // /start
@@ -236,6 +255,9 @@ bot.on('callback_query', async (query) => {
       tx.status = 'approved';
       await redis.set(`tx:${txId}`, JSON.stringify(tx));
 
+      await redis.incrby('stats:total_sum', 250);
+      await redis.incr('stats:total_sales');
+
       if (tx.refCode && tx.refCode !== 'DIRECT') {
         await redis.incrby(`ref:${tx.refCode}:paid_sum`, 250);
         await redis.incr(`ref:${tx.refCode}:paid_count`);
@@ -294,10 +316,23 @@ bot.onText(/\/p_pass\s+(.+)/, async (msg, match) => {
 
 bot.onText(/\/a_pass\s+(.+)/, async (msg, match) => {
   if (match[1] === ADMIN_PASSWORD) {
-    const paidCount = (await redis.get('ref:BLOGER2026:paid_count')) || 0;
-    const paidSum = (await redis.get('ref:BLOGER2026:paid_sum')) || 0;
+    const serverStatus = await checkServerStatus();
+    const totalSum = (await redis.get('stats:total_sum')) || 0;
+    const totalSales = (await redis.get('stats:total_sales')) || 0;
+    
+    const blogerPaidCount = (await redis.get('ref:BLOGER2026:paid_count')) || 0;
+    const blogerPaidSum = (await redis.get('ref:BLOGER2026:paid_sum')) || 0;
 
-    await bot.sendMessage(msg.chat.id, `⚙️ **АДМИН-ПАНЕЛЬ**\n\n🎟 **BLOGER2026**:\n• Оплат: **${paidCount}**\n• Сумма: **${paidSum} ₽**`, { parse_mode: 'Markdown' });
+    const adminText = `⚙️ **АДМИНИСТРИРОВАНИЕ STROMVPN**\n\n` +
+                      `🌐 Status 3x-ui: **${serverStatus}**\n` +
+                      `💰 Общая выручка: **${totalSum} ₽**\n` +
+                      `🛒 Всего продаж: **${totalSales}**\n\n` +
+                      `🎟 **Реферал BLOGER2026**:\n` +
+                      `• Продаж: **${blogerPaidCount}**\n` +
+                      `• Выручка: **${blogerPaidSum} ₽**\n` +
+                      `• Выплата партнеру (50%): **${Math.floor(blogerPaidSum * 0.5)} ₽**`;
+
+    await bot.sendMessage(msg.chat.id, adminText, { parse_mode: 'Markdown' });
   } else {
     await bot.sendMessage(msg.chat.id, '❌ Неверный пароль.');
   }
