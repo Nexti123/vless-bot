@@ -8,7 +8,7 @@ const { v4: uuidv4 } = require('uuid');
 const app = express();
 app.use(express.json());
 
-// Игнорируем проблемы с SSL сертификатами
+// Отключение проверки SSL-сертификатов для взаимодействия с 3x-ui
 const httpsAgent = new https.Agent({ rejectUnauthorized: false });
 
 const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
@@ -26,11 +26,11 @@ const userStates = {};
 
 bot.on('polling_error', (error) => console.error('Telegram Error:', error.message));
 
-// Полная авторизация и добавление клиента
+// Функция взаимодействия с 3x-ui
 async function createXuiClient(email, uuid) {
-  const baseUrl = 'https://213.176.95.147:8080/KYi7wBAUnIWNyUhgBk';
+  // Берем полную ссылку из XUI_HOST (настроена в Render)
+  const baseUrl = process.env.XUI_HOST.replace(/\/$/, '');
 
-  // Создаем клиент Axios с заголовками браузера
   const instance = axios.create({
     baseURL: baseUrl,
     timeout: 12000,
@@ -38,12 +38,12 @@ async function createXuiClient(email, uuid) {
     headers: {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       'Accept': 'application/json, text/plain, */*',
-      'Origin': 'https://213.176.95.147:8080',
+      'Origin': baseUrl,
       'Referer': `${baseUrl}/panel/`
     }
   });
 
-  // 1. Запрос на вход
+  // 1. Авторизация
   const loginRes = await instance.post('/login', {
     username: process.env.XUI_USERNAME,
     password: process.env.XUI_PASSWORD
@@ -53,14 +53,14 @@ async function createXuiClient(email, uuid) {
     throw new Error(loginRes.data?.msg || 'Неверный логин или пароль XUI');
   }
 
-  // Извлекаем куки из ответа
+  // Извлечение куки сессии
   const rawCookies = loginRes.headers['set-cookie'];
   if (!rawCookies || rawCookies.length === 0) {
     throw new Error('Куки не получены от панели');
   }
   const cookie = rawCookies.map(c => c.split(';')[0]).join('; ');
 
-  // 2. Добавление пользователя
+  // 2. Добавление клиента в inbound
   const inboundId = parseInt(process.env.XUI_INBOUND_ID || '1');
   const clientData = {
     id: inboundId,
@@ -86,10 +86,12 @@ async function createXuiClient(email, uuid) {
     throw new Error(addRes.data.msg || 'Ошибка при добавлении клиента в 3x-ui');
   }
 
-  return `vless://${uuid}@213.176.95.147:443?type=tcp&security=reality&encryption=none#STROMVPN-${email}`;
+  // Получаем домен/IP для формирования ссылки VLESS
+  const serverHost = new URL(baseUrl).hostname;
+  return `vless://${uuid}@${serverHost}:443?type=tcp&security=reality&encryption=none#STROMVPN-${email}`;
 }
 
-// Команда /start
+// /start
 bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
   const chatId = msg.chat.id;
   const userId = String(msg.from.id);
@@ -122,7 +124,7 @@ bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
   }
 });
 
-// Обработка текстовых сообщений
+// Сообщения
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const userId = String(msg.from.id);
@@ -141,7 +143,7 @@ bot.on('message', async (msg) => {
   }
 });
 
-// Обработка кнопок
+// Кнопки
 bot.on('callback_query', async (query) => {
   const chatId = query.message.chat.id;
   const userId = String(query.from.id);
