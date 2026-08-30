@@ -42,22 +42,7 @@ function addClientViaSSH(clientUuid, clientEmail) {
     
     conn.on('ready', () => {
       const inboundId = 1; // ID входящего подключения в 3x-ui (обычно 1)
-      const settingsObj = {
-        clients: [{
-          id: clientUuid,
-          flow: "",
-          email: clientEmail,
-          limitIp: 0,
-          totalGB: 0,
-          expiryTime: 0,
-          enable: true,
-          tgId: "",
-          subId: ""
-        }]
-      };
       
-      const settingsStr = JSON.stringify(JSON.stringify(settingsObj));
-      // Команда добавляет клиента через json_patch или обновление массива clients в SQLite базе 3x-ui
       const sqlCommand = `python3 -c "
 import sqlite3, json
 conn = sqlite3.connect('/etc/x-ui/x-ui.db')
