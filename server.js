@@ -53,18 +53,17 @@ for path in db_paths:
         break
 
 if not db_path:
-    print("ERROR: x-ui.db not found in standard directories")
+    print("ERROR: x-ui.db not found")
     sys.exit(1)
 
 try:
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
-    
     cursor.execute('SELECT id, settings FROM inbounds LIMIT 1')
     row = cursor.fetchone()
     
     if not row:
-        print("ERROR: No inbounds found in database")
+        print("ERROR: No inbounds found")
         sys.exit(1)
         
     inbound_id = row[0]
@@ -103,38 +102,21 @@ except Exception as e:
       const sqlCommand = `python3 -c "import base64; exec(base64.b64decode('${encodedScript}').decode('utf-8'))" && x-ui restart xray`;
 
       conn.exec(sqlCommand, (err, stream) => {
-        if (err) {
-          conn.end();
-          return reject(err);
-        }
-        let output = '';
-        let errorOutput = '';
-
+        if (err) { conn.end(); return reject(err); }
+        let output = '', errorOutput = '';
         stream.on('close', (code) => {
           conn.end();
-          if (code === 0 && output.includes('DB_SUCCESS')) {
-            resolve(true);
-          } else {
-            reject(new Error(`SSH/DB Error (code ${code}): ${errorOutput || output}`));
-          }
-        }).on('data', (data) => {
-          output += data.toString();
-        }).stderr.on('data', (data) => {
-          errorOutput += data.toString();
-        });
+          if (code === 0 && output.includes('DB_SUCCESS')) resolve(true);
+          else reject(new Error(`SSH Error: ${errorOutput || output}`));
+        }).on('data', (data) => { output += data.toString(); })
+          .stderr.on('data', (data) => { errorOutput += data.toString(); });
       });
-    }).on('error', (err) => {
-      reject(err);
-    }).connect({
-      host: '213.176.95.147',
-      port: 22,
-      username: 'root',
-      password: 'TempPass4321#'
-    });
+    }).on('error', (err) => reject(err))
+    .connect({ host: '213.176.95.147', port: 22, username: 'root', password: 'TempPass4321#' });
   });
 }
 
-// Функция удаления ключа с сервера через SSH
+// Исправленная и надежная функция удаления ключа через SSH
 function removeClientViaSSH(clientUuid) {
   return new Promise((resolve, reject) => {
     const conn = new Client();
@@ -161,6 +143,7 @@ try:
     cursor.execute('SELECT id, settings FROM inbounds')
     rows = cursor.fetchall()
     
+    updated = False
     for row in rows:
         inbound_id = row[0]
         s = json.loads(row[1])
@@ -169,8 +152,9 @@ try:
             s['clients'] = [c for c in s['clients'] if c.get('id') != '${clientUuid}']
             if len(s['clients']) < original_len:
                 cursor.execute('UPDATE inbounds SET settings = ? WHERE id = ?', (json.dumps(s), inbound_id))
-                conn.commit()
+                updated = True
                 
+    conn.commit()
     conn.close()
     print('DB_SUCCESS')
 except Exception as e:
@@ -182,44 +166,29 @@ except Exception as e:
       const sqlCommand = `python3 -c "import base64; exec(base64.b64decode('${encodedScript}').decode('utf-8'))" && x-ui restart xray`;
 
       conn.exec(sqlCommand, (err, stream) => {
-        if (err) {
-          conn.end();
-          return reject(err);
-        }
-        let output = '';
+        if (err) { conn.end(); return reject(err); }
+        let output = '', errorOutput = '';
         stream.on('close', (code) => {
           conn.end();
-          if (code === 0 && output.includes('DB_SUCCESS')) {
-            resolve(true);
-          } else {
-            reject(new Error(`SSH Delete Error (code ${code}): ${output}`));
-          }
-        }).on('data', (data) => {
-          output += data.toString();
-        });
+          if (code === 0 && output.includes('DB_SUCCESS')) resolve(true);
+          else reject(new Error(`SSH Delete Error: ${errorOutput || output}`));
+        }).on('data', (data) => { output += data.toString(); })
+          .stderr.on('data', (data) => { errorOutput += data.toString(); });
       });
-    }).on('error', (err) => {
-      reject(err);
-    }).connect({
-      host: '213.176.95.147',
-      port: 22,
-      username: 'root',
-      password: 'TempPass4321#'
-    });
+    }).on('error', (err) => reject(err))
+    .connect({ host: '213.176.95.147', port: 22, username: 'root', password: 'TempPass4321#' });
   });
 }
 
-// Генерация ссылки клиента
 function generateVlessUrl(clientUuid, username) {
   const serverIp = '213.176.95.147';
   const clientPort = process.env.CLIENT_PORT || '80'; 
   const pathEncoded = encodeURIComponent(process.env.VLESS_PATH || '/myconnection');
   const host = process.env.VLESS_HOST || 'time.com';
-  
   return `vless://${clientUuid}@${serverIp}:${clientPort}?type=ws&security=none&path=${pathEncoded}&host=${host}#STROMVPN-${username}`;
 }
 
-// /start
+// Telegram /start
 bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
   const chatId = msg.chat.id;
   const userId = String(msg.from.id);
@@ -253,7 +222,6 @@ bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
   }
 });
 
-// Обработка текстовых сообщений
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const userId = String(msg.from.id);
@@ -264,12 +232,11 @@ bot.on('message', async (msg) => {
   if (userStates[userId] && userStates[userId].startsWith('support_reply_')) {
     const targetUserId = userStates[userId].replace('support_reply_', '');
     delete userStates[userId];
-
     try {
       await bot.sendMessage(targetUserId, `💬 **Ответ от техподдержки:**\n\n${text}`, { parse_mode: 'Markdown' });
-      await bot.sendMessage(chatId, '✅ **Ответ успешно отправлен пользователю!**', { parse_mode: 'Markdown' });
+      await bot.sendMessage(chatId, '✅ **Ответ успешно отправлен пользователю!**');
     } catch (err) {
-      await bot.sendMessage(chatId, '❌ Не удалось отправить сообщение пользователю.');
+      await bot.sendMessage(chatId, '❌ Не удалось отправить сообщение.');
     }
     return;
   }
@@ -278,9 +245,9 @@ bot.on('message', async (msg) => {
     delete userStates[userId];
     if (text.toUpperCase() === 'BLOGER2026') {
       await redis.set(`user:${userId}:ref`, 'BLOGER2026');
-      await bot.sendMessage(chatId, '✅ **Промокод BLOGER2026 успешно применён!**', { parse_mode: 'Markdown' });
+      await bot.sendMessage(chatId, '✅ **Промокод BLOGER2026 успешно применён!**');
     } else {
-      await bot.sendMessage(chatId, '❌ **Неверный промокод.**', { parse_mode: 'Markdown' });
+      await bot.sendMessage(chatId, '❌ **Неверный промокод.**');
     }
     return;
   }
@@ -294,19 +261,12 @@ bot.on('message', async (msg) => {
 
     if (ADMIN_ID) {
       const supportMsg = `💬 **ВОПРОС В ПОДДЕРЖКУ**\n\n👤 От: @${username} (${firstName})\n🆔 ID: \`${userId}\`\n\n📝 **Текст:**\n${text}`;
-      const supportKeyboard = {
-        inline_keyboard: [[{ text: '✍️ Ответить', callback_data: `reply_support_${userId}` }]]
-      };
-      try {
-        await bot.sendMessage(ADMIN_ID, supportMsg, { parse_mode: 'Markdown', reply_markup: supportKeyboard });
-      } catch (err) {
-        console.error('⚠️ Ошибка техподдержки админу:', err.message);
-      }
+      const supportKeyboard = { inline_keyboard: [[{ text: '✍️ Ответить', callback_data: `reply_support_${userId}` }]] };
+      await bot.sendMessage(ADMIN_ID, supportMsg, { parse_mode: 'Markdown', reply_markup: supportKeyboard }).catch(() => {});
     }
   }
 });
 
-// Кнопки бота
 bot.on('callback_query', async (query) => {
   const chatId = query.message.chat.id;
   const userId = String(query.from.id);
@@ -321,24 +281,20 @@ bot.on('callback_query', async (query) => {
       const backKeyboard = { inline_keyboard: [[{ text: '◀️ В главное меню', callback_data: 'main_menu' }]] };
       await bot.sendMessage(chatId, supportText, { parse_mode: 'Markdown', reply_markup: backKeyboard });
     }
-
     else if (data.startsWith('reply_support_')) {
       const targetUserId = data.replace('reply_support_', '');
       userStates[userId] = `support_reply_${targetUserId}`;
       await bot.sendMessage(chatId, '✍️ **Введите ответ пользователю сообщением в этот чат:**', { parse_mode: 'Markdown' });
     }
-
     else if (data === 'enter_promo') {
       userStates[userId] = 'awaiting_promo';
       await bot.sendMessage(chatId, '🎟 **Отправьте промокод сообщением в этот чат:**', { parse_mode: 'Markdown' });
     }
-
     else if (data === 'buy_access') {
       let activePromo = (await redis.get(`user:${userId}:ref`)) || 'Отсутствует';
       const payText = `💳 **ОПЛАТА ПО СБП**\n\nСумма к оплате: **250 ₽**\n🎟 Промокод: **${activePromo}**\n\n` +
                       `**Реквизиты:** ИП Малыгин М. Е.\n` +
                       `Переведите 250 ₽ по СБП и нажмите **«Я оплатил»**.`;
-
       const payKeyboard = {
         inline_keyboard: [
           [{ text: '✅ Я оплатил', callback_data: 'submit_payment' }],
@@ -348,7 +304,6 @@ bot.on('callback_query', async (query) => {
       };
       await bot.sendMessage(chatId, payText, { parse_mode: 'Markdown', reply_markup: payKeyboard });
     }
-
     else if (data === 'submit_payment') {
       const txId = uuidv4();
       const refCode = (await redis.get(`user:${userId}:ref`)) || 'DIRECT';
@@ -368,30 +323,21 @@ bot.on('callback_query', async (query) => {
             { text: '❌ Отклонить', callback_data: `reject_${txId}` }
           ]]
         };
-        try {
-          await bot.sendMessage(ADMIN_ID, adminMsg, { parse_mode: 'Markdown', reply_markup: adminKeyboard });
-        } catch (err) {
-          console.error('⚠️ Ошибка уведомления админу:', err.message);
-        }
+        await bot.sendMessage(ADMIN_ID, adminMsg, { parse_mode: 'Markdown', reply_markup: adminKeyboard }).catch(() => {});
       }
     }
-
     else if (data === 'my_keys') {
       let keys = (await redis.lrange(`user:${userId}:keys`, 0, -1)) || [];
       if (keys.length === 0) return bot.sendMessage(chatId, '🔑 У вас пока нет активных ключей.');
-
       let msg = `🔑 **Ваши активные VLESS-ключи:**\n\n` + keys.map((k, i) => `**Ключ #${i + 1}:**\n\`${k}\``).join('\n\n');
       await bot.sendMessage(chatId, msg, { parse_mode: 'Markdown' });
     }
-
     else if (data === 'web_partner_info') {
       await bot.sendMessage(chatId, `📊 **Кабинет партнера доступен на сайте!**\n\nСсылка:\n\`https://vless-bot-mzmy.onrender.com/partner\``, { parse_mode: 'Markdown' });
     }
-
     else if (data === 'web_admin_info') {
       await bot.sendMessage(chatId, `⚙️ **Админ-панель доступна на сайте!**\n\nСсылка:\n\`https://vless-bot-mzmy.onrender.com/admin\``, { parse_mode: 'Markdown' });
     }
-
     else if (data === 'main_menu') {
       delete userStates[userId];
       const keyboard = {
@@ -406,11 +352,9 @@ bot.on('callback_query', async (query) => {
       };
       await bot.sendMessage(chatId, '👋 **Главное меню STROMVPN**', { parse_mode: 'Markdown', reply_markup: keyboard });
     }
-
     else if (data.startsWith('approve_')) {
       const txId = data.replace('approve_', '');
       const txRaw = await redis.get(`tx:${txId}`);
-
       if (!txRaw) return bot.sendMessage(chatId, '❌ Транзакция не найдена');
       const tx = typeof txRaw === 'string' ? JSON.parse(txRaw) : txRaw;
       if (tx.status !== 'pending') return bot.sendMessage(chatId, '⚠️ Уже обработано');
@@ -432,7 +376,6 @@ bot.on('callback_query', async (query) => {
 
       try {
         await addClientViaSSH(clientUuid, clientEmail);
-
         await redis.rpush(`user:${tx.userId}:keys`, vlessUrl);
         await redis.rpush('global:keys', JSON.stringify({
           userId: tx.userId,
@@ -443,13 +386,11 @@ bot.on('callback_query', async (query) => {
         }));
 
         await bot.sendMessage(tx.userId, `🎉 **Ваш платеж одобрен!**\n\n🔑 Ваш новый VLESS-ключ:\n\`${vlessUrl}\``, { parse_mode: 'Markdown' });
-        await bot.sendMessage(chatId, `✅ **Платёж одобрен, ключ активирован в x-ui без разрыва связи!**`, { parse_mode: 'Markdown' });
+        await bot.sendMessage(chatId, `✅ **Платёж одобрен, ключ активирован в x-ui!**`);
       } catch (sshErr) {
-        console.error('SSH Error:', sshErr);
-        await bot.sendMessage(chatId, `❌ **Ошибка SSH при добавлении в панель:**\n${sshErr.message}`);
+        await bot.sendMessage(chatId, `❌ **Ошибка SSH:**\n${sshErr.message}`);
       }
     }
-
     else if (data.startsWith('reject_')) {
       const txId = data.replace('reject_', '');
       const txRaw = await redis.get(`tx:${txId}`);
@@ -466,39 +407,48 @@ bot.on('callback_query', async (query) => {
   }
 });
 
-// ================= БЕЗОПАСНЫЕ WEB ПАНЕЛИ С ВВОДОМ ПАРОЛЯ =================
+// ================= КРАСИВЫЙ И ЗАЩИЩЕННЫЙ ВЕБ-ИНТЕРФЕЙС =================
 
-app.get('/partner', async (req, res) => {
-  const pass = req.query.pass;
+const commonCss = `
+  body { font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background: #0b0f19; color: #f3f4f6; margin: 0; padding: 20px; display: flex; justify-content: center; align-items: flex-start; min-height: 100vh; }
+  .wrapper { width: 100%; max-width: 1100px; margin: auto; }
+  .card { background: #161e2e; border: 1px solid #1f293d; padding: 30px; border-radius: 16px; box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5); }
+  h2, h3 { color: #38bdf8; margin-top: 0; }
+  input, select, button { width: 100%; padding: 12px 16px; margin-top: 10px; border-radius: 8px; border: 1px solid #334155; box-sizing: border-box; font-size: 14px; }
+  input, select { background: #0f172a; color: #fff; }
+  input:focus, select:focus { outline: none; border-color: #38bdf8; }
+  button { font-weight: 600; cursor: pointer; transition: background 0.2s; border: none; }
+  .btn-primary { background: #2563eb; color: #fff; }
+  .btn-primary:hover { background: #1d4ed8; }
+  .btn-danger { background: #dc2626; color: #fff; }
+  .btn-danger:hover { background: #b91c1c; }
+  .btn-success { background: #16a34a; color: #fff; }
+  .btn-success:hover { background: #15803d; }
+  table { width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 14px; }
+  th { background: #1e293b; color: #94a3b8; padding: 12px; text-align: left; }
+  td { padding: 12px; border-bottom: 1px solid #1f293d; }
+  tr:hover td { background: rgba(255, 255, 255, 0.01); }
+  .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 30px; }
+  .stat-box { background: #1e293b; padding: 20px; border-radius: 12px; border: 1px solid #334155; text-align: center; }
+  .login-container { display: flex; justify-content: center; align-items: center; height: 80vh; }
+  .login-card { width: 360px; text-align: center; }
+  .badge { display: inline-block; padding: 4px 8px; border-radius: 4px; font-size: 12px; background: #334155; }
+`;
+
+// КАБИНЕТ ПАРТНЕРА
+app.all('/partner', async (req, res) => {
+  const pass = req.method === 'POST' ? req.body.pass : req.query.pass;
   
   if (pass !== PARTNER_PASSWORD) {
     return res.send(`
-      <!DOCTYPE html>
-      <html lang="ru">
-      <head>
-        <meta charset="UTF-8">
-        <title>Вход в кабинет партнера - STROMVPN</title>
-        <style>
-          body { font-family: Arial, sans-serif; background: #0f172a; color: #f8fafc; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
-          .card { background: #1e293b; padding: 30px; border-radius: 12px; width: 320px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); text-align: center; }
-          input, button { width: 100%; padding: 12px; margin-top: 15px; border-radius: 6px; border: none; box-sizing: border-box; }
-          input { background: #334155; color: #fff; }
-          button { background: #22c55e; color: #fff; font-weight: bold; cursor: pointer; }
-          button:hover { background: #16a34a; }
-          h2 { color: #38bdf8; margin-top: 0; }
-        </style>
-      </head>
-      <body>
-        <div class="card">
-          <h2>📊 Кабинет партнера</h2>
-          <p style="font-size: 14px; color: #94a3b8;">Введите пароль для доступа</p>
-          <form action="/partner" method="GET">
-            <input type="password" name="pass" required placeholder="Пароль партнера">
-            <button type="submit">Войти</button>
-          </form>
-        </div>
-      </body>
-      </html>
+      <!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><title>Вход - Партнер</title><style>${commonCss}</style></head>
+      <body><div class="login-container"><div class="card login-card">
+        <h2>📊 Кабинет партнера</h2><p style="color: #94a3b8; font-size: 13px;">Введите партнерский пароль</p>
+        <form action="/partner" method="POST">
+          <input type="password" name="pass" required placeholder="Пароль">
+          <button type="submit" class="btn-primary" style="margin-top:15px;">Войти</button>
+        </form>
+      </div></div></body></html>
     `);
   }
 
@@ -508,43 +458,23 @@ app.get('/partner', async (req, res) => {
   const partnerBalance = Math.floor(paidSum * 0.5);
 
   res.send(`
-    <!DOCTYPE html>
-    <html lang="ru">
-    <head>
-      <meta charset="UTF-8">
-      <title>Кабинет партнера - STROMVPN</title>
-      <style>
-        body { font-family: Arial, sans-serif; background: #0f172a; color: #f8fafc; padding: 40px; }
-        .card { background: #1e293b; padding: 30px; border-radius: 12px; max-width: 500px; margin: auto; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
-        h2 { color: #38bdf8; margin-top: 0; }
-        .stat { font-size: 18px; margin: 15px 0; }
-        input, button { width: 100%; padding: 12px; margin-top: 10px; border-radius: 6px; border: none; box-sizing: border-box; }
-        input { background: #334155; color: #fff; }
-        button { background: #22c55e; color: #fff; font-weight: bold; cursor: pointer; font-size: 16px; }
-        button:hover { background: #16a34a; }
-      </style>
-    </head>
-    <body>
-      <div class="card">
-        <h2>📊 Кабинет партнера (BLOGER2026)</h2>
-        <div class="stat">🖱 Всего кликов по ссылке: <b>${clicks}</b></div>
-        <div class="stat">💳 Оплачено подписок: <b>${paidCount}</b></div>
-        <div class="stat">💰 Заработано (50%): <b style="color: #4ade80;">${partnerBalance} ₽</b></div>
-        
-        <hr style="border: 0; border-top: 1px solid #334155; margin: 20px 0;">
-        
-        <h3>💳 Запросить выплату</h3>
-        <form action="/partner/withdraw" method="POST">
-          <input type="hidden" name="pass" value="${pass}">
-          <label>Банк (например, Сбер, Т-Банк):</label>
-          <input type="text" name="bank" required placeholder="Сбербанк">
-          <label>Номер телефона для перевода:</label>
-          <input type="text" name="phone" required placeholder="+7 999 000-00-00">
-          <button type="submit">Отправить заявку на выплату</button>
-        </form>
+    <!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><title>Кабинет партнера</title><style>${commonCss}</style></head>
+    <body><div class="wrapper"><div class="card">
+      <h2>📊 Кабинет партнера (BLOGER2026)</h2>
+      <div class="stats-grid" style="margin-top:20px;">
+        <div class="stat-box"><div style="color:#94a3b8">Клик по ссылке</div><div style="font-size:24px; font-weight:bold; color:#38bdf8;">${clicks}</div></div>
+        <div class="stat-box"><div style="color:#94a3b8">Оплачено подписок</div><div style="font-size:24px; font-weight:bold; color:#38bdf8;">${paidCount}</div></div>
+        <div class="stat-box"><div style="color:#94a3b8">Ваш баланс (50%)</div><div style="font-size:24px; font-weight:bold; color:#4ade80;">${partnerBalance} ₽</div></div>
       </div>
-    </body>
-    </html>
+      <hr style="border:0; border-top:1px solid #1f293d; margin:25px 0;">
+      <h3>💳 Запросить выплату</h3>
+      <form action="/partner/withdraw" method="POST" style="max-width: 400px;">
+        <input type="hidden" name="pass" value="${pass}">
+        <label>Банк (Сбер, Т-Банк и др.):</label><input type="text" name="bank" required placeholder="Сбербанк">
+        <label style="display:block; margin-top:10px;">Телефон для перевода:</label><input type="text" name="phone" required placeholder="+7 999 000-00-00">
+        <button type="submit" class="btn-success" style="margin-top:15px;">Отправить заявку</button>
+      </form>
+    </div></div></body></html>
   `);
 });
 
@@ -556,123 +486,107 @@ app.post('/partner/withdraw', async (req, res) => {
   const partnerBalance = Math.floor(paidSum * 0.5);
 
   if (ADMIN_ID) {
-    const withdrawMsg = `💸 **ЗАЯВКА НА ВЫПЛАТУ ОТ ПАРТНЕРА**\n\n🎟 Промокод: \`BLOGER2026\`\n💰 Сумма к выплате: **${partnerBalance} ₽**\n🏦 Банк: \`${bank}\`\n📱 Телефон: \`${phone}\``;
-    await bot.sendMessage(ADMIN_ID, withdrawMsg, { parse_mode: 'Markdown' }).catch(() => {});
+    const msg = `💸 **ЗАЯВКА НА ВЫПЛАТУ**\n\n🎟 Промокод: \`BLOGER2026\`\n💰 Сумма: **${partnerBalance} ₽**\n🏦 Банк: \`${bank}\`\n📱 Телефон: \`${phone}\``;
+    await bot.sendMessage(ADMIN_ID, msg, { parse_mode: 'Markdown' }).catch(() => {});
   }
 
-  res.send(`
-    <body style="background:#0f172a;color:#fff;font-family:Arial;text-align:center;padding-top:50px;">
-      <div style="background:#1e293b;padding:30px;max-width:400px;margin:auto;border-radius:12px;">
-        <h2 style="color:#4ade80;">✅ Заявка отправлена!</h2>
-        <p>Администратор получил уведомление с вашими реквизитами (${bank}, ${phone}). Ожидайте перевод.</p>
-        <a href="/partner?pass=${PARTNER_PASSWORD}" style="color:#38bdf8;text-decoration:none;">Назад в кабинет</a>
-      </div>
-    </body>
-  `);
+  res.send(`<!DOCTYPE html><html lang="ru"><head><style>${commonCss}</style></head>
+    <body><div class="login-container"><div class="card login-card" style="text-align:center;">
+      <h2 style="color:#4ade80;">✅ Заявка отправлена!</h2>
+      <p style="color:#94a3b8; font-size:14px;">Администратор получил уведомление. Ожидайте перевод.</p>
+      <form action="/partner" method="POST"><input type="hidden" name="pass" value="${pass}"><button type="submit" class="btn-primary" style="margin-top:15px;">Назад в кабинет</button></form>
+    </div></div></body></html>`);
 });
 
-app.get('/admin', async (req, res) => {
-  const pass = req.query.pass;
+// АДМИН-ПАНЕЛЬ
+app.all('/admin', async (req, res) => {
+  const pass = req.method === 'POST' ? req.body.pass : req.query.pass;
 
   if (pass !== ADMIN_PASSWORD) {
     return res.send(`
-      <!DOCTYPE html>
-      <html lang="ru">
-      <head>
-        <meta charset="UTF-8">
-        <title>Вход в админ-панель - STROMVPN</title>
-        <style>
-          body { font-family: Arial, sans-serif; background: #0f172a; color: #f8fafc; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
-          .card { background: #1e293b; padding: 30px; border-radius: 12px; width: 320px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); text-align: center; }
-          input, button { width: 100%; padding: 12px; margin-top: 15px; border-radius: 6px; border: none; box-sizing: border-box; }
-          input { background: #334155; color: #fff; }
-          button { background: #ef4444; color: #fff; font-weight: bold; cursor: pointer; }
-          button:hover { background: #dc2626; }
-          h2 { color: #38bdf8; margin-top: 0; }
-        </style>
-      </head>
-      <body>
-        <div class="card">
-          <h2>⚙️ Админ-панель</h2>
-          <p style="font-size: 14px; color: #94a3b8;">Введите пароль администратора</p>
-          <form action="/admin" method="GET">
-            <input type="password" name="pass" required placeholder="Пароль администратора">
-            <button type="submit">Войти</button>
-          </form>
-        </div>
-      </body>
-      </html>
+      <!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><title>Вход - Админ-панель</title><style>${commonCss}</style></head>
+      <body><div class="login-container"><div class="card login-card">
+        <h2>⚙️ Админ-панель</h2><p style="color: #94a3b8; font-size: 13px;">Введите пароль администратора</p>
+        <form action="/admin" method="POST">
+          <input type="password" name="pass" required placeholder="Пароль администратора">
+          <button type="submit" class="btn-danger" style="margin-top:15px;">Войти</button>
+        </form>
+      </div></div></body></html>
     `);
   }
 
   const totalSum = (await redis.get('stats:total_sum')) || 0;
   const totalSales = (await redis.get('stats:total_sales')) || 0;
+  const refClicks = (await redis.get('ref:BLOGER2026:clicks')) || 0;
+  const refPaidSum = (await redis.get('ref:BLOGER2026:paid_sum')) || 0;
+
   const rawKeys = (await redis.lrange('global:keys', 0, -1)) || [];
   const keysList = rawKeys.map(k => typeof k === 'string' ? JSON.parse(k) : k);
 
   let keysHtml = keysList.map((k, index) => `
-    <tr style="border-bottom: 1px solid #334155;">
-      <td style="padding: 10px;">${index + 1}</td>
-      <td style="padding: 10px;">@${k.username} (ID: ${k.userId})</td>
-      <td style="padding: 10px; word-break: break-all; font-family: monospace; font-size: 12px;">${k.vlessUrl}</td>
-      <td style="padding: 10px;">
-        <form action="/admin/delete-key" method="POST" style="display:inline;" onsubmit="return confirm('Точно удалить этот ключ?');">
+    <tr>
+      <td><b>${index + 1}</b></td>
+      <td>@${k.username || 'unknown'} <br><span style="color:#64748b; font-size:12px;">ID: ${k.userId}</span></td>
+      <td style="word-break: break-all; font-family: monospace; font-size: 11px; color:#38bdf8;">${k.vlessUrl}</td>
+      <td style="white-space: nowrap;">
+        <form action="/admin/extend-key" method="POST" style="display:inline;">
+          <input type="hidden" name="pass" value="${pass}">
+          <input type="hidden" name="userId" value="${k.userId}">
+          <input type="hidden" name="vlessUrl" value="${k.vlessUrl}">
+          <button type="submit" class="btn-success" style="padding:6px 10px; font-size:12px; margin-right:4px;">Продлить</button>
+        </form>
+        <form action="/admin/delete-key" method="POST" style="display:inline;" onsubmit="return confirm('Точно удалить этот ключ навсегда?');">
           <input type="hidden" name="pass" value="${pass}">
           <input type="hidden" name="uuid" value="${k.uuid}">
           <input type="hidden" name="userId" value="${k.userId}">
           <input type="hidden" name="vlessUrl" value="${k.vlessUrl}">
-          <button type="submit" style="background:#ef4444;color:#fff;border:none;padding:6px 12px;border-radius:4px;cursor:pointer;">Удалить</button>
+          <button type="submit" class="btn-danger" style="padding:6px 10px; font-size:12px;">Удалить</button>
         </form>
       </td>
     </tr>
   `).join('');
 
   res.send(`
-    <!DOCTYPE html>
-    <html lang="ru">
-    <head>
-      <meta charset="UTF-8">
-      <title>Админ-панель - STROMVPN</title>
-      <style>
-        body { font-family: Arial, sans-serif; background: #0f172a; color: #f8fafc; padding: 30px; }
-        .container { max-width: 1000px; margin: auto; background: #1e293b; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
-        h2, h3 { color: #38bdf8; }
-        .stats-box { display: flex; gap: 20px; margin-bottom: 30px; }
-        .stat-card { background: #334155; padding: 20px; border-radius: 8px; flex: 1; text-align: center; }
-        table { width: 100%; border-collapse: collapse; margin-top: 15px; }
-        th { background: #334155; padding: 10px; text-align: left; }
-      </style>
-    </head>
-    <body>
-      <div class="container">
-        <h2>⚙️ Админ-панель STROMVPN</h2>
-        <div class="stats-box">
-          <div class="stat-card">
-            <h3>Общая выручка</h3>
-            <p style="font-size: 24px; color: #4ade80; margin:0;">${totalSum} ₽</p>
-          </div>
-          <div class="stat-card">
-            <h3>Всего продаж</h3>
-            <p style="font-size: 24px; color: #38bdf8; margin:0;">${totalSales}</p>
-          </div>
-        </div>
-
-        <h3>🔑 Управление активными ключами пользователей</h3>
-        <table>
-          <tr>
-            <th>#</th>
-            <th>Пользователь</th>
-            <th>VLESS Ключ</th>
-            <th>Действие</th>
-          </tr>
-          ${keysHtml || '<tr><td colspan="4" style="padding:15px; text-align:center;">Нет активных ключей</td></tr>'}
-        </table>
+    <!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><title>Админ-панель</title><style>${commonCss}</style></head>
+    <body><div class="wrapper"><div class="card">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <h2>⚙️ Панель управления STROMVPN</h2>
+        <form action="/admin" method="POST"><input type="hidden" name="pass" value="${pass}"><button type="submit" style="width:auto; padding:8px 16px; background:#334155; color:#fff; font-size:12px;">Обновить</button></form>
       </div>
-    </body>
-    </html>
+
+      <div class="stats-grid" style="margin-top:20px;">
+        <div class="stat-box"><div style="color:#94a3b8">Общая выручка</div><div style="font-size:22px; font-weight:bold; color:#4ade80;">${totalSum} ₽</div></div>
+        <div class="stat-box"><div style="color:#94a3b8">Всего продаж</div><div style="font-size:22px; font-weight:bold; color:#38bdf8;">${totalSales}</div></div>
+        <div class="stat-box"><div style="color:#94a3b8">Реф. клики / Оборот</div><div style="font-size:16px; font-weight:bold; margin-top:5px; color:#f8fafc;">${refClicks} кликов / ${refPaidSum} ₽</div></div>
+      </div>
+
+      <!-- Кнопки сброса -->
+      <div style="display:flex; gap:10px; margin-bottom:30px;">
+        <form action="/admin/reset-stats" method="POST" onsubmit="return confirm('Обнулить общую выручку и продажи?');" style="flex:1;">
+          <input type="hidden" name="pass" value="${pass}">
+          <button type="submit" class="btn-danger" style="background:#7f1d1d;">🗑 Обнулить общую статистику</button>
+        </form>
+        <form action="/admin/reset-ref" method="POST" onsubmit="return confirm('Обнулить реферальные клики и выплаты?');" style="flex:1;">
+          <input type="hidden" name="pass" value="${pass}">
+          <button type="submit" class="btn-danger" style="background:#7f1d1d;">🗑 Обнулить рефералы (BLOGER2026)</button>
+        </form>
+      </div>
+
+      <h3>🔑 Управление активными ключами (${keysList.length})</h3>
+      <table>
+        <tr>
+          <th>#</th>
+          <th>Пользователь</th>
+          <th>VLESS Ключ</th>
+          <th>Действия</th>
+        </tr>
+        ${keysHtml || '<tr><td colspan="4" style="text-align:center; color:#64748b; padding:20px;">Нет активных ключей</td></tr>'}
+      </table>
+    </div></div></body></html>
   `);
 });
 
+// Действия администратора с ключами и статистикой
 app.post('/admin/delete-key', async (req, res) => {
   const { pass, uuid, userId, vlessUrl } = req.body;
   if (pass !== ADMIN_PASSWORD) return res.status(403).send('Доступ запрещен');
@@ -688,15 +602,42 @@ app.post('/admin/delete-key', async (req, res) => {
         break;
       }
     }
-
     if (userId && vlessUrl) {
       await redis.lrem(`user:${userId}:keys`, 1, vlessUrl);
     }
   } catch (err) {
-    console.error('Ошибка при удалении ключа через админку:', err);
+    console.error('Ошибка удаления ключа:', err);
   }
 
-  res.redirect(`/admin?pass=${ADMIN_PASSWORD}`);
+  res.send(`<form id="f" action="/admin" method="POST"><input type="hidden" name="pass" value="${pass}"></form><script>document.getElementById('f').submit();</script>`);
+});
+
+app.post('/admin/extend-key', async (req, res) => {
+  const { pass, userId, vlessUrl } = req.body;
+  if (pass !== ADMIN_PASSWORD) return res.status(403).send('Доступ запрещен');
+  
+  if (userId) {
+    await bot.sendMessage(userId, `🎉 **Ваша подписка/ключ были продлены администратором!**\n\n🔑 Ключ:\n\`${vlessUrl}\``, { parse_mode: 'Markdown' }).catch(()=>{});
+  }
+
+  res.send(`<form id="f" action="/admin" method="POST"><input type="hidden" name="pass" value="${pass}"></form><script>alert('Ключ успешно продлен, уведомление отправлено пользователю!'); document.getElementById('f').submit();</script>`);
+});
+
+app.post('/admin/reset-stats', async (req, res) => {
+  const { pass } = req.body;
+  if (pass !== ADMIN_PASSWORD) return res.status(403).send('Доступ запрещен');
+  await redis.set('stats:total_sum', 0);
+  await redis.set('stats:total_sales', 0);
+  res.send(`<form id="f" action="/admin" method="POST"><input type="hidden" name="pass" value="${pass}"></form><script>document.getElementById('f').submit();</script>`);
+});
+
+app.post('/admin/reset-ref', async (req, res) => {
+  const { pass } = req.body;
+  if (pass !== ADMIN_PASSWORD) return res.status(403).send('Доступ запрещен');
+  await redis.set('ref:BLOGER2026:clicks', 0);
+  await redis.set('ref:BLOGER2026:paid_count', 0);
+  await redis.set('ref:BLOGER2026:paid_sum', 0);
+  res.send(`<form id="f" action="/admin" method="POST"><input type="hidden" name="pass" value="${pass}"></form><script>document.getElementById('f').submit();</script>`);
 });
 
 const PORT = process.env.PORT || 3000;
