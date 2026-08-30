@@ -35,32 +35,37 @@ bot.on('polling_error', (error) => {
   }
 });
 
-// Функция добавления клиента в 3x-ui через SSH с детальным логированием ошибок
+// Функция добавления клиента в 3x-ui через SSH БЕЗ перезагрузки панели (чтобы не рвать соединения)
 function addClientViaSSH(clientUuid, clientEmail) {
   return new Promise((resolve, reject) => {
     const conn = new Client();
     
     conn.on('ready', () => {
-      const inboundId = 1; // ID входящего подключения в 3x-ui
-      
       const pythonScript = `
 import sqlite3, json, sys
 try:
     conn = sqlite3.connect('/etc/x-ui/x-ui.db')
     cursor = conn.cursor()
-    cursor.execute('SELECT settings FROM inbounds WHERE id = ${inboundId}')
+    
+    # Автоматически находим первый доступный инбаунд
+    cursor.execute('SELECT id, settings FROM inbounds LIMIT 1')
     row = cursor.fetchone()
+    
     if not row:
-        print("ERROR: Inbound ID ${inboundId} not found in database")
+        print("ERROR: No inbounds found in database")
         sys.exit(1)
+        
+    inbound_id = row[0]
+    s = json.loads(row[1])
     
-    s = json.loads(row[0])
-    
+    if 'clients' not in s:
+        s['clients'] = []
+
     # Проверяем, нет ли уже такого uuid
     existing_ids = [c.get('id') for c in s.get('clients', [])]
     if '${clientUuid}' in existing_ids:
-        print("ERROR: Client UUID already exists")
-        sys.exit(1)
+        print("DB_SUCCESS")
+        sys.exit(0)
 
     s['clients'].append({
         'id': '${clientUuid}',
@@ -74,7 +79,7 @@ try:
         'subId': ''
     })
     
-    cursor.execute('UPDATE inbounds SET settings = ? WHERE id = ${inboundId}', (json.dumps(s),))
+    cursor.execute('UPDATE inbounds SET settings = ? WHERE id = ?', (json.dumps(s), inbound_id))
     conn.commit()
     conn.close()
     print('DB_SUCCESS')
@@ -84,7 +89,8 @@ except Exception as e:
 `;
 
       const encodedScript = Buffer.from(pythonScript).toString('base64');
-      const sqlCommand = `python3 -c "import base64; exec(base64.b64decode('${encodedScript}').decode('utf-8'))" && x-ui restart`;
+      // Внимание: x-ui restart полностью убран, соединения пользователей не пострадают!
+      const sqlCommand = `python3 -c "import base64; exec(base64.b64decode('${encodedScript}').decode('utf-8'))"`;
 
       conn.exec(sqlCommand, (err, stream) => {
         if (err) {
@@ -96,7 +102,7 @@ except Exception as e:
 
         stream.on('close', (code) => {
           conn.end();
-          console.log(`SSH Exit Code: ${code}, Output: ${output.trim()}`);
+          console.log(`SSH Logs (No Restart): Exit ${code}, Output: ${output.trim()}`);
           if (code === 0 && output.includes('DB_SUCCESS')) {
             resolve(true);
           } else {
@@ -318,7 +324,7 @@ bot.on('callback_query', async (query) => {
       await bot.sendMessage(chatId, '👋 **Главное меню STROMVPN**', { parse_mode: 'Markdown', reply_markup: keyboard });
     }
 
-    // Одобрение платежа и добавление клиента через SSH
+    // Одобрение платежа и добавление клиента в базу без рестарта панели
     else if (data.startsWith('approve_')) {
       const txId = data.replace('approve_', '');
       const txRaw = await redis.get(`tx:${txId}`);
@@ -343,7 +349,7 @@ bot.on('callback_query', async (query) => {
       const vlessUrl = generateVlessUrl(clientUuid, tx.username);
 
       try {
-        // Добавляем в реальную панель по SSH
+        // Добавляем в базу панели без перезагрузки сервиса
         await addClientViaSSH(clientUuid, clientEmail);
 
         await redis.rpush(`user:${tx.userId}:keys`, vlessUrl);
@@ -356,7 +362,7 @@ bot.on('callback_query', async (query) => {
         }));
 
         await bot.sendMessage(tx.userId, `🎉 **Ваш платеж одобрен!**\n\n🔑 Ваш новый VLESS-ключ:\n\`${vlessUrl}\``, { parse_mode: 'Markdown' });
-        await bot.sendMessage(chatId, `✅ **Платёж одобрен, уникальный ключ добавлен в 3x-ui через SSH и выдан пользователю!**`, { parse_mode: 'Markdown' });
+        await bot.sendMessage(chatId, `✅ **Платёж одобрен, ключ записан в базу 3x-ui без обрыва связи у пользователей!**`, { parse_mode: 'Markdown' });
       } catch (sshErr) {
         console.error('SSH Error:', sshErr);
         await bot.sendMessage(chatId, `❌ **Ошибка SSH при добавлении в панель:**\n${sshErr.message}`);
