@@ -35,75 +35,70 @@ bot.on('polling_error', (error) => {
   }
 });
 
-// Надежная функция добавления клиента с поиском правильного пути к БД и полным набором полей
-function addClientViaSSH(clientUuid, clientEmail) {
+/**
+ * Функция добавления клиента напрямую в чистый config.json на сервере через SSH
+ * и мягкого релоада ядра Xray (systemctl reload xray) без обрыва сессий.
+ */
+function addClientToXrayConfig(clientUuid, clientEmail) {
   return new Promise((resolve, reject) => {
     const conn = new Client();
     
     conn.on('ready', () => {
+      // Скрипт выполняется на удаленном сервере: читает JSON, добавляет клиента, сохраняет и делает reload
       const pythonScript = `
-import sqlite3, json, sys, os
+import json, os, sys
 
-db_paths = ['/etc/x-ui/x-ui.db', '/usr/local/x-ui/x-ui.db']
-db_path = None
+config_path = '/usr/local/etc/xray/config.json'
+if not os.path.exists(config_path):
+    config_path = '/etc/xray/config.json'
 
-for path in db_paths:
-    if os.path.exists(path):
-        db_path = path
-        break
-
-if not db_path:
-    print("ERROR: x-ui.db not found in standard directories")
+if not os.path.exists(config_path):
+    print("ERROR: config.json not found")
     sys.exit(1)
 
 try:
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    
-    cursor.execute('SELECT id, settings FROM inbounds LIMIT 1')
-    row = cursor.fetchone()
-    
-    if not row:
-        print("ERROR: No inbounds found in database")
-        sys.exit(1)
-        
-    inbound_id = row[0]
-    s = json.loads(row[1])
-    
-    if 'clients' not in s:
-        s['clients'] = []
+    with open(config_path, 'r', encoding='utf-8') as f:
+        config = json.load(f)
 
-    # Проверка на существование uuid
-    existing_ids = [c.get('id') for c in s.get('clients', [])]
+    # Ищем inbound с протоколом vless
+    inbound = None
+    for i in config.get('inbounds', []):
+        if i.get('protocol') == 'vless':
+            inbound = i
+            break
+
+    if not inbound:
+        print("ERROR: VLESS inbound not found in config.json")
+        sys.exit(1)
+
+    if 'clients' not in inbound['settings']:
+        inbound['settings']['clients'] = []
+
+    # Проверяем, есть ли уже такой UUID
+    existing_ids = [c.get('id') for c in inbound['settings']['clients']]
     if '${clientUuid}' in existing_ids:
-        print("DB_SUCCESS")
+        print("CONFIG_SUCCESS")
         sys.exit(0)
 
-    # Полная структура клиента для 100% совместимости с ядром Xray
-    s['clients'].append({
+    # Добавляем нового клиента
+    inbound['settings']['clients'].append({
         'id': '${clientUuid}',
-        'flow': '',
-        'email': '${clientEmail}',
-        'limitIp': 0,
-        'totalGB': 0,
-        'expiryTime': 0,
-        'enable': True,
-        'tgId': '',
-        'subId': '${clientUuid}'
+        'flow': 'xtls-rprx-vision',
+        'email': '${clientEmail}'
     })
-    
-    cursor.execute('UPDATE inbounds SET settings = ? WHERE id = ?', (json.dumps(s), inbound_id))
-    conn.commit()
-    conn.close()
-    print('DB_SUCCESS')
+
+    with open(config_path, 'w', encoding='utf-8') as f:
+        json.dump(config, f, indent=2, ensure_ascii=False)
+
+    print("CONFIG_SUCCESS")
 except Exception as e:
     print(f"ERROR: {str(e)}")
     sys.exit(1)
 `;
 
       const encodedScript = Buffer.from(pythonScript).toString('base64');
-      // Мягкий рестарт только ядра Xray, веб-панель не трогаем (соединения не рвутся)
-      const sqlCommand = `python3 -c "import base64; exec(base64.b64decode('${encodedScript}').decode('utf-8'))" && x-ui restart xray`;
+      // Запускаем питон-скрипт и делаем systemctl reload xray (соединения не падают!)
+      const sqlCommand = `python3 -c "import base64; exec(base64.b64decode('${encodedScript}').decode('utf-8'))" && systemctl reload xray`;
 
       conn.exec(sqlCommand, (err, stream) => {
         if (err) {
@@ -115,11 +110,11 @@ except Exception as e:
 
         stream.on('close', (code) => {
           conn.end();
-          console.log(`SSH Logs: Exit ${code}, Output: ${output.trim()}`);
-          if (code === 0 && output.includes('DB_SUCCESS')) {
+          console.log(`SSH Logs (Xray Reload): Exit ${code}, Output: ${output.trim()}`);
+          if (code === 0 && output.includes('CONFIG_SUCCESS')) {
             resolve(true);
           } else {
-            reject(new Error(`SSH/DB Error (code ${code}): ${errorOutput || output}`));
+            reject(new Error(`SSH/Config Error (code ${code}): ${errorOutput || output}`));
           }
         }).on('data', (data) => {
           output += data.toString();
@@ -142,7 +137,7 @@ except Exception as e:
 // Генерация ссылки клиента
 function generateVlessUrl(clientUuid, username) {
   const serverIp = '213.176.95.147';
-  const clientPort = process.env.CLIENT_PORT || '80'; 
+  const clientPort = process.env.CLIENT_PORT || '443'; 
   const pathEncoded = encodeURIComponent(process.env.VLESS_PATH || '/myconnection');
   const host = process.env.VLESS_HOST || 'time.com';
   
@@ -361,7 +356,8 @@ bot.on('callback_query', async (query) => {
       const vlessUrl = generateVlessUrl(clientUuid, tx.username);
 
       try {
-        await addClientViaSSH(clientUuid, clientEmail);
+        // Добавляем напрямую в чистый config.json без посредников и делаем systemctl reload xray
+        await addClientToXrayConfig(clientUuid, clientEmail);
 
         await redis.rpush(`user:${tx.userId}:keys`, vlessUrl);
         await redis.rpush('global:keys', JSON.stringify({
@@ -373,10 +369,10 @@ bot.on('callback_query', async (query) => {
         }));
 
         await bot.sendMessage(tx.userId, `🎉 **Ваш платеж одобрен!**\n\n🔑 Ваш новый VLESS-ключ:\n\`${vlessUrl}\``, { parse_mode: 'Markdown' });
-        await bot.sendMessage(chatId, `✅ **Платёж одобрен, ключ активирован в 3x-ui без разрыва связи!**`, { parse_mode: 'Markdown' });
+        await bot.sendMessage(chatId, `✅ **Платёж одобрен, ключ записан в конфиг и активирован!**`, { parse_mode: 'Markdown' });
       } catch (sshErr) {
         console.error('SSH Error:', sshErr);
-        await bot.sendMessage(chatId, `❌ **Ошибка SSH при добавлении в панель:**\n${sshErr.message}`);
+        await bot.sendMessage(chatId, `❌ **Ошибка SSH при добавлении в конфиг:**\n${sshErr.message}`);
       }
     }
 
