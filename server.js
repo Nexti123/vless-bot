@@ -34,7 +34,7 @@ bot.on('polling_error', (error) => {
   }
 });
 
-// Генерация рабочего VLESS ключа локально (без ошибки 403)
+// Локальная генерация VLESS ключа (без обращения к внешней панельной API, исключая 403 ошибку)
 function generateLocalVlessKey(telegramId, username) {
   const clientUuid = uuidv4();
   const serverIp = '213.176.95.147';
@@ -212,11 +212,11 @@ bot.on('callback_query', async (query) => {
     }
 
     else if (data === 'web_partner_info') {
-      await bot.sendMessage(chatId, `📊 **Кабинет партнера доступен на сайте!**\n\nПерейдите по адресу вашего сервера с указанием пароля, например:\n\`https://ваш-сайт.onrender.com/partner?pass=${PARTNER_PASSWORD}\``, { parse_mode: 'Markdown' });
+      await bot.sendMessage(chatId, `📊 **Кабинет партнера доступен на сайте!**\n\nПерейдите по ссылке:\n\`https://vless-bot-mzmy.onrender.com/partner?pass=${PARTNER_PASSWORD}\``, { parse_mode: 'Markdown' });
     }
 
     else if (data === 'web_admin_info') {
-      await bot.sendMessage(chatId, `⚙️ **Админ-панель доступна на сайте!**\n\nПерейдите в панель управления ключами и выплатами по ссылке:\n\`https://ваш-сайт.onrender.com/admin?pass=${ADMIN_PASSWORD}\``, { parse_mode: 'Markdown' });
+      await bot.sendMessage(chatId, `⚙️ **Админ-панель доступна на сайте!**\n\nПерейдите в панель управления ключами и выплатами по ссылке:\n\`https://vless-bot-mzmy.onrender.com/admin?pass=${ADMIN_PASSWORD}\``, { parse_mode: 'Markdown' });
     }
 
     else if (data === 'main_menu') {
@@ -254,10 +254,9 @@ bot.on('callback_query', async (query) => {
         await redis.incr(`ref:${tx.refCode}:paid_count`);
       }
 
-      // Генерация ключа локально без ошибок
+      // Генерация ключа локально
       const keyInfo = generateLocalVlessKey(tx.userId, tx.username);
       
-      // Сохраняем ключ в базу для пользователя и в общий список ключей админа
       await redis.rpush(`user:${tx.userId}:keys`, keyInfo.vlessUrl);
       await redis.rpush('global:keys', JSON.stringify({
         userId: tx.userId,
@@ -342,7 +341,7 @@ app.get('/partner', async (req, res) => {
   `);
 });
 
-// Обработка запроса выплаты
+// Обработка заявки на выплату от партнера
 app.post('/partner/withdraw', async (req, res) => {
   const { pass, bank, phone } = req.body;
   if (pass !== PARTNER_PASSWORD) return res.status(403).send('Доступ запрещен');
@@ -366,7 +365,7 @@ app.post('/partner/withdraw', async (req, res) => {
   `);
 });
 
-// 2. Админ-панель на сайте (просмотр всех ключей и управление)
+// 2. Админ-панель на сайте (просмотр ключей, выручки и управление)
 app.get('/admin', async (req, res) => {
   const pass = req.query.pass;
   if (pass !== ADMIN_PASSWORD) {
