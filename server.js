@@ -35,7 +35,7 @@ bot.on('polling_error', (error) => {
   }
 });
 
-// Надежная функция добавления клиента с поиском правильного пути к БД и полным набором полей
+// Надежная функция добавления клиента через SSH
 function addClientViaSSH(clientUuid, clientEmail) {
   return new Promise((resolve, reject) => {
     const conn = new Client();
@@ -73,13 +73,11 @@ try:
     if 'clients' not in s:
         s['clients'] = []
 
-    # Проверка на существование uuid
     existing_ids = [c.get('id') for c in s.get('clients', [])]
     if '${clientUuid}' in existing_ids:
         print("DB_SUCCESS")
         sys.exit(0)
 
-    # Полная структура клиента для 100% совместимости с ядром Xray
     s['clients'].append({
         'id': '${clientUuid}',
         'flow': '',
@@ -114,7 +112,6 @@ except Exception as e:
 
         stream.on('close', (code) => {
           conn.end();
-          console.log(`SSH Logs: Exit ${code}, Output: ${output.trim()}`);
           if (code === 0 && output.includes('DB_SUCCESS')) {
             resolve(true);
           } else {
@@ -124,7 +121,6 @@ except Exception as e:
           output += data.toString();
         }).stderr.on('data', (data) => {
           errorOutput += data.toString();
-          console.error('SSH STDERR: ' + data);
         });
       });
     }).on('error', (err) => {
@@ -138,7 +134,7 @@ except Exception as e:
   });
 }
 
-// Функция удаления ключа с сервера через SSH (SQLite + рестарт)
+// Функция удаления ключа с сервера через SSH
 function removeClientViaSSH(clientUuid) {
   return new Promise((resolve, reject) => {
     const conn = new Client();
@@ -389,11 +385,11 @@ bot.on('callback_query', async (query) => {
     }
 
     else if (data === 'web_partner_info') {
-      await bot.sendMessage(chatId, `📊 **Кабинет партнера доступен на сайте!**\n\nПерейдите по ссылке:\n\`https://vless-bot-mzmy.onrender.com/partner?pass=${PARTNER_PASSWORD}\``, { parse_mode: 'Markdown' });
+      await bot.sendMessage(chatId, `📊 **Кабинет партнера доступен на сайте!**\n\nСсылка:\n\`https://vless-bot-mzmy.onrender.com/partner\``, { parse_mode: 'Markdown' });
     }
 
     else if (data === 'web_admin_info') {
-      await bot.sendMessage(chatId, `⚙️ **Админ-панель доступна на сайте!**\n\nПерейдите в панель управления ключами и выплатами по ссылке:\n\`https://vless-bot-mzmy.onrender.com/admin?pass=${ADMIN_PASSWORD}\``, { parse_mode: 'Markdown' });
+      await bot.sendMessage(chatId, `⚙️ **Админ-панель доступна на сайте!**\n\nСсылка:\n\`https://vless-bot-mzmy.onrender.com/admin\``, { parse_mode: 'Markdown' });
     }
 
     else if (data === 'main_menu') {
@@ -470,12 +466,40 @@ bot.on('callback_query', async (query) => {
   }
 });
 
-// ================= WEB ПАНЕЛИ (САЙТ) =================
+// ================= БЕЗОПАСНЫЕ WEB ПАНЕЛИ С ВВОДОМ ПАРОЛЯ =================
 
 app.get('/partner', async (req, res) => {
   const pass = req.query.pass;
+  
   if (pass !== PARTNER_PASSWORD) {
-    return res.status(403).send('<h1>❌ Ошибка доступа: неверный пароль партнера</h1>');
+    return res.send(`
+      <!DOCTYPE html>
+      <html lang="ru">
+      <head>
+        <meta charset="UTF-8">
+        <title>Вход в кабинет партнера - STROMVPN</title>
+        <style>
+          body { font-family: Arial, sans-serif; background: #0f172a; color: #f8fafc; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+          .card { background: #1e293b; padding: 30px; border-radius: 12px; width: 320px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); text-align: center; }
+          input, button { width: 100%; padding: 12px; margin-top: 15px; border-radius: 6px; border: none; box-sizing: border-box; }
+          input { background: #334155; color: #fff; }
+          button { background: #22c55e; color: #fff; font-weight: bold; cursor: pointer; }
+          button:hover { background: #16a34a; }
+          h2 { color: #38bdf8; margin-top: 0; }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <h2>📊 Кабинет партнера</h2>
+          <p style="font-size: 14px; color: #94a3b8;">Введите пароль для доступа</p>
+          <form action="/partner" method="GET">
+            <input type="password" name="pass" required placeholder="Пароль партнера">
+            <button type="submit">Войти</button>
+          </form>
+        </div>
+      </body>
+      </html>
+    `);
   }
 
   const clicks = (await redis.get('ref:BLOGER2026:clicks')) || 0;
@@ -511,7 +535,7 @@ app.get('/partner', async (req, res) => {
         
         <h3>💳 Запросить выплату</h3>
         <form action="/partner/withdraw" method="POST">
-          <input type="hidden" name="pass" value="${PARTNER_PASSWORD}">
+          <input type="hidden" name="pass" value="${pass}">
           <label>Банк (например, Сбер, Т-Банк):</label>
           <input type="text" name="bank" required placeholder="Сбербанк">
           <label>Номер телефона для перевода:</label>
@@ -549,8 +573,36 @@ app.post('/partner/withdraw', async (req, res) => {
 
 app.get('/admin', async (req, res) => {
   const pass = req.query.pass;
+
   if (pass !== ADMIN_PASSWORD) {
-    return res.status(403).send('<h1>❌ Ошибка доступа: неверный пароль администратора</h1>');
+    return res.send(`
+      <!DOCTYPE html>
+      <html lang="ru">
+      <head>
+        <meta charset="UTF-8">
+        <title>Вход в админ-панель - STROMVPN</title>
+        <style>
+          body { font-family: Arial, sans-serif; background: #0f172a; color: #f8fafc; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+          .card { background: #1e293b; padding: 30px; border-radius: 12px; width: 320px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); text-align: center; }
+          input, button { width: 100%; padding: 12px; margin-top: 15px; border-radius: 6px; border: none; box-sizing: border-box; }
+          input { background: #334155; color: #fff; }
+          button { background: #ef4444; color: #fff; font-weight: bold; cursor: pointer; }
+          button:hover { background: #dc2626; }
+          h2 { color: #38bdf8; margin-top: 0; }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <h2>⚙️ Админ-панель</h2>
+          <p style="font-size: 14px; color: #94a3b8;">Введите пароль администратора</p>
+          <form action="/admin" method="GET">
+            <input type="password" name="pass" required placeholder="Пароль администратора">
+            <button type="submit">Войти</button>
+          </form>
+        </div>
+      </body>
+      </html>
+    `);
   }
 
   const totalSum = (await redis.get('stats:total_sum')) || 0;
@@ -564,8 +616,8 @@ app.get('/admin', async (req, res) => {
       <td style="padding: 10px;">@${k.username} (ID: ${k.userId})</td>
       <td style="padding: 10px; word-break: break-all; font-family: monospace; font-size: 12px;">${k.vlessUrl}</td>
       <td style="padding: 10px;">
-        <form action="/admin/delete-key" method="POST" style="display:inline;">
-          <input type="hidden" name="pass" value="${ADMIN_PASSWORD}">
+        <form action="/admin/delete-key" method="POST" style="display:inline;" onsubmit="return confirm('Точно удалить этот ключ?');">
+          <input type="hidden" name="pass" value="${pass}">
           <input type="hidden" name="uuid" value="${k.uuid}">
           <input type="hidden" name="userId" value="${k.userId}">
           <input type="hidden" name="vlessUrl" value="${k.vlessUrl}">
@@ -626,10 +678,8 @@ app.post('/admin/delete-key', async (req, res) => {
   if (pass !== ADMIN_PASSWORD) return res.status(403).send('Доступ запрещен');
 
   try {
-    // 1. Удаляем из x-ui.db через SSH
     await removeClientViaSSH(uuid);
 
-    // 2. Удаляем из глобального списка ключей в Redis
     const rawKeys = (await redis.lrange('global:keys', 0, -1)) || [];
     for (let raw of rawKeys) {
       let k = typeof raw === 'string' ? JSON.parse(raw) : raw;
@@ -639,7 +689,6 @@ app.post('/admin/delete-key', async (req, res) => {
       }
     }
 
-    // 3. Удаляем ключ из списка конкретного пользователя в Redis
     if (userId && vlessUrl) {
       await redis.lrem(`user:${userId}:keys`, 1, vlessUrl);
     }
