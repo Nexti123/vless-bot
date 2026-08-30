@@ -2,6 +2,7 @@ const express = require('express');
 const TelegramBot = require('node-telegram-bot-api');
 const { Redis } = require('@upstash/redis');
 const { v4: uuidv4 } = require('uuid');
+const cron = require('node-cron');
 
 const app = express();
 app.use(express.json());
@@ -34,7 +35,17 @@ bot.on('polling_error', (error) => {
   }
 });
 
-// Telegram /start (без плашек админки и партнера)
+// Главное меню (с кнопкой инструкций)
+const getMainMenuKeyboard = () => ({
+  inline_keyboard: [
+    [{ text: '🛒 Купить доступ (250 ₽)', callback_data: 'buy_access' }],
+    [{ text: '🔑 Мои ключи', callback_data: 'my_keys' }, { text: '📖 Инструкции', callback_data: 'instructions' }],
+    [{ text: '🎟 Ввести промокод', callback_data: 'enter_promo' }],
+    [{ text: '💬 Техподдержка', callback_data: 'support' }]
+  ]
+});
+
+// Telegram /start
 bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
   const chatId = msg.chat.id;
   const userId = String(msg.from.id);
@@ -51,16 +62,7 @@ bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
                         `💳 Стоимость: **250 ₽ / 30 дней**\n\n` +
                         `Выберите действие ниже:`;
 
-    const keyboard = {
-      inline_keyboard: [
-        [{ text: '🛒 Купить доступ (250 ₽)', callback_data: 'buy_access' }],
-        [{ text: '🎟 Ввести промокод', callback_data: 'enter_promo' }],
-        [{ text: '🔑 Мои ключи', callback_data: 'my_keys' }],
-        [{ text: '💬 Техподдержка', callback_data: 'support' }]
-      ]
-    };
-
-    await bot.sendMessage(chatId, welcomeText, { parse_mode: 'Markdown', reply_markup: keyboard });
+    await bot.sendMessage(chatId, welcomeText, { parse_mode: 'Markdown', reply_markup: getMainMenuKeyboard() });
   } catch (err) {
     console.error('Error /start:', err.message);
   }
@@ -173,20 +175,58 @@ bot.on('callback_query', async (query) => {
     else if (data === 'my_keys') {
       let keys = (await redis.lrange(`user:${userId}:keys`, 0, -1)) || [];
       if (keys.length === 0) return bot.sendMessage(chatId, '🔑 У вас пока нет активных ключей.');
+      
       let msg = `🔑 **Ваши активные VLESS-ключи:**\n\n` + keys.map((k, i) => `**Ключ #${i + 1}:**\n\`${k}\``).join('\n\n');
-      await bot.sendMessage(chatId, msg, { parse_mode: 'Markdown' });
+      const kb = { inline_keyboard: [[{ text: '📖 Инструкция по подключению', callback_data: 'instructions' }, { text: '◀️ Назад', callback_data: 'main_menu' }]] };
+      await bot.sendMessage(chatId, msg, { parse_mode: 'Markdown', reply_markup: kb });
+    }
+    else if (data === 'instructions') {
+      const text = `📖 **Инструкция по подключению STROMVPN**\n\n` +
+                   `Выберите вашу операционную систему для настройки:\n\n` +
+                   `1️⃣ Скопируйте ваш ключ из раздела **«🔑 Мои ключи»**.\n` +
+                   `2️⃣ Скачайте приложение для вашей платформы ниже:`;
+      const kb = {
+        inline_keyboard: [
+          [{ text: '🍏 iPhone / iPad (Streisand)', callback_data: 'inst_ios' }],
+          [{ text: '🤖 Android (v2rayNG)', callback_data: 'inst_android' }],
+          [{ text: '💻 Windows / Mac (Hiddify)', callback_data: 'inst_pc' }],
+          [{ text: '◀️ Главное меню', callback_data: 'main_menu' }]
+        ]
+      };
+      await bot.sendMessage(chatId, text, { parse_mode: 'Markdown', reply_markup: kb });
+    }
+    else if (data === 'inst_ios') {
+      const text = `🍏 **Настройка для iPhone / iPad:**\n\n` +
+                   `1. Установите приложение **Streisand** из App Store.\n` +
+                   `2. Скопируйте ваш VLESS-ключ в боте.\n` +
+                   `3. Откройте Streisand, нажмите на символ **«+»** в правом верхнем углу.\n` +
+                   `4. Выберите **«Import from clipboard»** (Импортировать из буфера).\n` +
+                   `5. Нажмите на появившееся соединение и переведите тумблер подключения в активное положение. Готово!`;
+      const kb = { inline_keyboard: [[{ text: '◀️ К выбору устройств', callback_data: 'instructions' }]] };
+      await bot.sendMessage(chatId, text, { parse_mode: 'Markdown', reply_markup: kb });
+    }
+    else if (data === 'inst_android') {
+      const text = `🤖 **Настройка для Android:**\n\n` +
+                   `1. Скачайте и установите приложение **v2rayNG** из Google Play.\n` +
+                   `2. Скопируйте ваш VLESS-ключ в боте.\n` +
+                   `3. Откройте v2rayNG, нажмите на значок **«+»** в правом верхнем углу.\n` +
+                   `4. Выберите **«Импорт из буфера обмена»**.\n` +
+                   `5. Нажмите на круглую кнопку Play в правом нижнем углу для запуска. Готово!`;
+      const kb = { inline_keyboard: [[{ text: '◀️ К выбору устройств', callback_data: 'instructions' }]] };
+      await bot.sendMessage(chatId, text, { parse_mode: 'Markdown', reply_markup: kb });
+    }
+    else if (data === 'inst_pc') {
+      const text = `💻 **Настройка для Windows / macOS / Linux:**\n\n` +
+                   `1. Скачайте и установите программу **Hiddify** с официального сайта или GitHub.\n` +
+                   `2. Скопируйте ваш VLESS-ключ в боте.\n` +
+                   `3. Откройте Hiddify, программа автоматически подхватит ключ из буфера обмена.\n` +
+                   `4. Нажмите большую центральную кнопку подключения. Готово!`;
+      const kb = { inline_keyboard: [[{ text: '◀️ К выбору устройств', callback_data: 'instructions' }]] };
+      await bot.sendMessage(chatId, text, { parse_mode: 'Markdown', reply_markup: kb });
     }
     else if (data === 'main_menu') {
       delete userStates[userId];
-      const keyboard = {
-        inline_keyboard: [
-          [{ text: '🛒 Купить доступ (250 ₽)', callback_data: 'buy_access' }],
-          [{ text: '🎟 Ввести промокод', callback_data: 'enter_promo' }],
-          [{ text: '🔑 Мои ключи', callback_data: 'my_keys' }],
-          [{ text: '💬 Техподдержка', callback_data: 'support' }]
-        ]
-      };
-      await bot.sendMessage(chatId, '👋 **Главное меню STROMVPN**', { parse_mode: 'Markdown', reply_markup: keyboard });
+      await bot.sendMessage(chatId, '👋 **Главное меню STROMVPN**', { parse_mode: 'Markdown', reply_markup: getMainMenuKeyboard() });
     }
     else if (data.startsWith('approve_')) {
       const txId = data.replace('approve_', '');
@@ -211,15 +251,23 @@ bot.on('callback_query', async (query) => {
         await redis.incr(`ref:${tx.refCode}:paid_count`);
       }
 
+      // Сохраняем ключ пользователю
       await redis.rpush(`user:${tx.userId}:keys`, nextKey);
+      
+      // Устанавливаем срок действия подписки (30 дней от текущего момента)
+      const expireTime = Date.now() + 30 * 24 * 60 * 60 * 1000;
+      await redis.set(`user:${tx.userId}:expire`, expireTime);
+
       await redis.rpush('global:keys', JSON.stringify({
         userId: tx.userId,
         username: tx.username,
         vlessUrl: nextKey,
-        created: new Date().toISOString()
+        created: new Date().toISOString(),
+        expire: expireTime
       }));
 
-      await bot.sendMessage(tx.userId, `🎉 **Ваш платеж одобрен!**\n\n🔑 Ваш новый VLESS-ключ:\n\`${nextKey}\``, { parse_mode: 'Markdown' });
+      const successKb = { inline_keyboard: [[{ text: '📖 Инструкция по подключению', callback_data: 'instructions' }]] };
+      await bot.sendMessage(tx.userId, `🎉 **Ваш платеж одобрен! Подписка активна 30 дней.**\n\n🔑 Ваш новый VLESS-ключ:\n\`${nextKey}\``, { parse_mode: 'Markdown', reply_markup: successKb });
       await bot.sendMessage(chatId, `✅ **Платёж одобрен! Ключ автоматически выдан пользователю из пула.**`);
     }
     else if (data.startsWith('reject_')) {
@@ -235,6 +283,35 @@ bot.on('callback_query', async (query) => {
     }
   } catch (err) {
     console.error('Callback error:', err.message);
+  }
+});
+
+// ================= ФОНОВАЯ ПРОВЕРКА ПОДПИСОК (CRON) =================
+// Запускается каждый день в 10:00 утра для отправки напоминаний о продлении
+cron.schedule('0 10 * * *', async () => {
+  try {
+    console.log('🔄 Запуск проверки сроков подписок...');
+    const rawKeys = (await redis.lrange('global:keys', 0, -1)) || [];
+    const now = Date.now();
+
+    for (let raw of rawKeys) {
+      let k = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      if (!k.expire) continue;
+
+      const diffDays = Math.ceil((k.expire - now) / (1000 * 60 * 60 * 24));
+
+      // Напоминание за 2 дня до окончания или в день окончания
+      if (diffDays === 2 || diffDays === 0) {
+        const msg = diffDays === 2 
+          ? `⚠️ **Внимание!** Срок действия вашей подписки STROMVPN истекает через 2 дня.\nПродлите доступ, чтобы не потерять связь!`
+          : `🔴 **Срок подписки истек сегодня!**\nВаш доступ заблокирован. Продлите подписку (250 ₽), чтобы продолжить пользоваться интернетом.`;
+        
+        const kb = { inline_keyboard: [[{ text: '🛒 Продлить подписку (250 ₽)', callback_data: 'buy_access' }]] };
+        await bot.sendMessage(k.userId, msg, { parse_mode: 'Markdown', reply_markup: kb }).catch(() => {});
+      }
+    }
+  } catch (err) {
+    console.error('Ошибка в cron-задаче подписок:', err);
   }
 });
 
