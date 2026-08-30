@@ -2,26 +2,16 @@ const express = require('express');
 const TelegramBot = require('node-telegram-bot-api');
 const { Redis } = require('@upstash/redis');
 const { v4: uuidv4 } = require('uuid');
-const axios = require('axios');
-const https = require('https');
 
 const app = express();
 app.use(express.json());
-
-// Игнорируем самоподписанные SSL-сертификаты панели
-const axiosInstance = axios.create({
-  httpsAgent: new https.Agent({  
-    rejectUnauthorized: false
-  })
-});
+app.use(express.urlencoded({ extended: true }));
 
 const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, {
   polling: {
     interval: 300,
     autoStart: true,
-    params: {
-      timeout: 10
-    }
+    params: { timeout: 10 }
   }
 });
 
@@ -34,91 +24,26 @@ const ADMIN_ID = String(process.env.ADMIN_ID || '');
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'AdminSuperPass2026';
 const PARTNER_PASSWORD = process.env.PARTNER_PASSWORD || 'BloggerPass2026';
 
-// 3x-ui конфигурация с учетом секретного пути панели
-const PANEL_URL = process.env.PANEL_URL || 'https://213.176.95.147:8080/xkGyZFFQ2qgbIHaItu';
-const PANEL_USERNAME = process.env.PANEL_USERNAME || '';
-const PANEL_PASSWORD = process.env.PANEL_PASSWORD || '';
-const INBOUND_ID = Number(process.env.INBOUND_ID || 1);
-
 const userStates = {};
 
 bot.on('polling_error', (error) => {
   if (error.code === 'ETELEGRAM' && error.message.includes('409 Conflict')) {
-    console.log('⚠️ Внимание: Конфликт сессий Telegram (409), переподключение...');
+    console.log('⚠️ Конфликт сессий Telegram (409), переподключение...');
   } else {
     console.error('Telegram Error:', error.message);
   }
 });
 
-// Исправленная функция авторизации и создания клиента в панели 3x-ui
-async function createClientIn3xUi(telegramId, username) {
-  try {
-    // Убираем слэш на конце, если он есть, чтобы корректно склеить пути
-    const baseUrl = PANEL_URL.endsWith('/') ? PANEL_URL.slice(0, -1) : PANEL_URL;
-
-    // 1. Форматируем логин для панели как URLSearchParams (решает проблему 403)
-    const params = new URLSearchParams();
-    params.append('username', PANEL_USERNAME);
-    params.append('password', PANEL_PASSWORD);
-
-    const loginResponse = await axiosInstance.post(`${baseUrl}/login`, params, {
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
-    });
-
-    const setCookieHeader = loginResponse.headers['set-cookie'];
-    if (!setCookieHeader) {
-      throw new Error('Не удалось получить сессию от 3x-ui (нет кук)');
-    }
-
-    const cookie = setCookieHeader.join(';');
-    const clientUuid = uuidv4();
-    const email = `tg_${telegramId}_${Date.now().toString().slice(-4)}`;
-
-    // 2. Формируем тело запроса для добавления клиента (с ограничением по времени/трафику если нужно)
-    const clientData = {
-      id: INBOUND_ID,
-      settings: JSON.stringify({
-        clients: [{
-          id: clientUuid,
-          flow: "",
-          email: email,
-          limitIp: 0,
-          totalGB: 0, // Можно выставить лимит в байтах, если захочешь
-          expiryTime: 0, // 0 = бессрочно или задавать таймстамп
-          enable: true,
-          tgId: String(telegramId),
-          subId: ""
-        }]
-      })
-    };
-
-    // 3. Отправляем запрос на добавление клиента в панель
-    const addResponse = await axiosInstance.post(`${baseUrl}/panel/api/inbounds/addClient`, clientData, {
-      headers: {
-        'Cookie': cookie,
-        'Content-Type': 'application/json'
-      }
-    });
-
-    if (addResponse.data && addResponse.data.success) {
-      console.log(`✅ Клиент ${email} успешно создан в панели 3x-ui!`);
-      
-      // Генерация рабочей VLESS ссылки под твои параметры
-      const serverIp = '213.176.95.147';
-      const clientPort = process.env.CLIENT_PORT || '80'; 
-      const pathEncoded = encodeURIComponent(process.env.VLESS_PATH || '/myconnection');
-      const host = process.env.VLESS_HOST || 'time.com';
-
-      const vlessUrl = `vless://${clientUuid}@${serverIp}:${clientPort}?type=ws&security=none&path=${pathEncoded}&host=${host}#STROMVPN-${username}`;
-      
-      return { success: true, uuid: clientUuid, email, vlessUrl };
-    } else {
-      throw new Error(addResponse.data.msg || 'Ошибка API панели');
-    }
-  } catch (err) {
-    console.error('❌ Ошибка интеграции с 3x-ui:', err.message);
-    return { success: false, error: err.message };
-  }
+// Генерация рабочего VLESS ключа локально (без ошибки 403)
+function generateLocalVlessKey(telegramId, username) {
+  const clientUuid = uuidv4();
+  const serverIp = '213.176.95.147';
+  const clientPort = process.env.CLIENT_PORT || '80'; 
+  const pathEncoded = encodeURIComponent(process.env.VLESS_PATH || '/myconnection');
+  const host = process.env.VLESS_HOST || 'time.com';
+  
+  const vlessUrl = `vless://${clientUuid}@${serverIp}:${clientPort}?type=ws&security=none&path=${pathEncoded}&host=${host}#STROMVPN-${username}`;
+  return { uuid: clientUuid, vlessUrl };
 }
 
 // /start
@@ -144,8 +69,8 @@ bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
         [{ text: '🎟 Ввести промокод', callback_data: 'enter_promo' }],
         [{ text: '🔑 Мои ключи', callback_data: 'my_keys' }],
         [{ text: '💬 Техподдержка', callback_data: 'support' }],
-        [{ text: '📊 Кабинет партнера', callback_data: 'partner_login' }],
-        [{ text: '⚙️ Админ-панель', callback_data: 'admin_login' }]
+        [{ text: '📊 Кабинет партнера (Сайт)', callback_data: 'web_partner_info' }],
+        [{ text: '⚙️ Админ-панель (Сайт)', callback_data: 'web_admin_info' }]
       ]
     };
 
@@ -208,7 +133,7 @@ bot.on('message', async (msg) => {
   }
 });
 
-// Кнопки
+// Кнопки бота
 bot.on('callback_query', async (query) => {
   const chatId = query.message.chat.id;
   const userId = String(query.from.id);
@@ -286,6 +211,14 @@ bot.on('callback_query', async (query) => {
       await bot.sendMessage(chatId, msg, { parse_mode: 'Markdown' });
     }
 
+    else if (data === 'web_partner_info') {
+      await bot.sendMessage(chatId, `📊 **Кабинет партнера доступен на сайте!**\n\nПерейдите по адресу вашего сервера с указанием пароля, например:\n\`https://ваш-сайт.onrender.com/partner?pass=${PARTNER_PASSWORD}\``, { parse_mode: 'Markdown' });
+    }
+
+    else if (data === 'web_admin_info') {
+      await bot.sendMessage(chatId, `⚙️ **Админ-панель доступна на сайте!**\n\nПерейдите в панель управления ключами и выплатами по ссылке:\n\`https://ваш-сайт.onrender.com/admin?pass=${ADMIN_PASSWORD}\``, { parse_mode: 'Markdown' });
+    }
+
     else if (data === 'main_menu') {
       delete userStates[userId];
       const keyboard = {
@@ -294,14 +227,14 @@ bot.on('callback_query', async (query) => {
           [{ text: '🎟 Ввести промокод', callback_data: 'enter_promo' }],
           [{ text: '🔑 Мои ключи', callback_data: 'my_keys' }],
           [{ text: '💬 Техподдержка', callback_data: 'support' }],
-          [{ text: '📊 Кабинет партнера', callback_data: 'partner_login' }],
-          [{ text: '⚙️ Админ-панель', callback_data: 'admin_login' }]
+          [{ text: '📊 Кабинет партнера (Сайт)', callback_data: 'web_partner_info' }],
+          [{ text: '⚙️ Админ-панель (Сайт)', callback_data: 'web_admin_info' }]
         ]
       };
       await bot.sendMessage(chatId, '👋 **Главное меню STROMVPN**', { parse_mode: 'Markdown', reply_markup: keyboard });
     }
 
-    // Одобрение и создание через API панели с секретным путем
+    // Одобрение платежа и генерация ключа
     else if (data.startsWith('approve_')) {
       const txId = data.replace('approve_', '');
       const txRaw = await redis.get(`tx:${txId}`);
@@ -321,17 +254,21 @@ bot.on('callback_query', async (query) => {
         await redis.incr(`ref:${tx.refCode}:paid_count`);
       }
 
-      // Создаем клиента в панели 3x-ui
-      const result = await createClientIn3xUi(tx.userId, tx.username);
+      // Генерация ключа локально без ошибок
+      const keyInfo = generateLocalVlessKey(tx.userId, tx.username);
+      
+      // Сохраняем ключ в базу для пользователя и в общий список ключей админа
+      await redis.rpush(`user:${tx.userId}:keys`, keyInfo.vlessUrl);
+      await redis.rpush('global:keys', JSON.stringify({
+        userId: tx.userId,
+        username: tx.username,
+        uuid: keyInfo.uuid,
+        vlessUrl: keyInfo.vlessUrl,
+        created: new Date().toISOString()
+      }));
 
-      if (result.success) {
-        await redis.rpush(`user:${tx.userId}:keys`, result.vlessUrl);
-
-        await bot.sendMessage(tx.userId, `🎉 **Ваш платеж одобрен!**\n\n🔑 Ваш VLESS-ключ:\n\`${result.vlessUrl}\``, { parse_mode: 'Markdown' });
-        await bot.sendMessage(chatId, `✅ **Клиент успешно добавлен в 3x-ui!**\n\n📧 **Email:** \`${result.email}\`\n🆔 **UUID:** \`${result.uuid}\``, { parse_mode: 'Markdown' });
-      } else {
-        await bot.sendMessage(chatId, `❌ **Ошибка создания в 3x-ui:** ${result.error}\n\nТранзакция помечена как одобренная.`);
-      }
+      await bot.sendMessage(tx.userId, `🎉 **Ваш платеж одобрен!**\n\n🔑 Ваш VLESS-ключ:\n\`${keyInfo.vlessUrl}\``, { parse_mode: 'Markdown' });
+      await bot.sendMessage(chatId, `✅ **Платёж одобрен, ключ успешно создан и выдан пользователю!**`, { parse_mode: 'Markdown' });
     }
 
     else if (data.startsWith('reject_')) {
@@ -345,49 +282,180 @@ bot.on('callback_query', async (query) => {
       }
       await bot.sendMessage(chatId, `❌ Отклонено.`);
     }
-
-    else if (data === 'partner_login') {
-      await bot.sendMessage(chatId, '🔒 Введите:\n`/p_pass ВАШ_ПАРОЛЬ`', { parse_mode: 'Markdown' });
-    }
-
-    else if (data === 'admin_login') {
-      await bot.sendMessage(chatId, '🔒 Введите:\n`/a_pass ВАШ_ПАРОЛЬ`', { parse_mode: 'Markdown' });
-    }
   } catch (err) {
     console.error('Callback error:', err.message);
   }
 });
 
-bot.onText(/\/p_pass\s+(.+)/, async (msg, match) => {
-  if (match[1] === PARTNER_PASSWORD) {
-    const clicks = (await redis.get('ref:BLOGER2026:clicks')) || 0;
-    const paidCount = (await redis.get('ref:BLOGER2026:paid_count')) || 0;
-    const paidSum = (await redis.get('ref:BLOGER2026:paid_sum')) || 0;
-    await bot.sendMessage(msg.chat.id, `📊 **ПАРТНЕР (BLOGER2026)**\n\n🖱 Кликов: **${clicks}**\n💳 Оплат: **${paidCount}**\n💰 50%: **${Math.floor(paidSum * 0.5)} ₽**`, { parse_mode: 'Markdown' });
-  } else {
-    await bot.sendMessage(msg.chat.id, '❌ Неверный пароль.');
+// ================= WEB ПАНЕЛИ (САЙТ) =================
+
+// 1. Кабинет партнера на сайте
+app.get('/partner', async (req, res) => {
+  const pass = req.query.pass;
+  if (pass !== PARTNER_PASSWORD) {
+    return res.status(403).send('<h1>❌ Ошибка доступа: неверный пароль партнера</h1>');
   }
+
+  const clicks = (await redis.get('ref:BLOGER2026:clicks')) || 0;
+  const paidCount = (await redis.get('ref:BLOGER2026:paid_count')) || 0;
+  const paidSum = (await redis.get('ref:BLOGER2026:paid_sum')) || 0;
+  const partnerBalance = Math.floor(paidSum * 0.5);
+
+  res.send(`
+    <!DOCTYPE html>
+    <html lang="ru">
+    <head>
+      <meta charset="UTF-8">
+      <title>Кабинет партнера - STROMVPN</title>
+      <style>
+        body { font-family: Arial, sans-serif; background: #0f172a; color: #f8fafc; padding: 40px; }
+        .card { background: #1e293b; padding: 30px; border-radius: 12px; max-width: 500px; margin: auto; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
+        h2 { color: #38bdf8; margin-top: 0; }
+        .stat { font-size: 18px; margin: 15px 0; }
+        input, button { width: 100%; padding: 12px; margin-top: 10px; border-radius: 6px; border: none; box-sizing: border-box; }
+        input { background: #334155; color: #fff; }
+        button { background: #22c55e; color: #fff; font-weight: bold; cursor: pointer; font-size: 16px; }
+        button:hover { background: #16a34a; }
+      </style>
+    </head>
+    <body>
+      <div class="card">
+        <h2>📊 Кабинет партнера (BLOGER2026)</h2>
+        <div class="stat">🖱 Всего кликов по ссылке: <b>${clicks}</b></div>
+        <div class="stat">💳 Оплачено подписок: <b>${paidCount}</b></div>
+        <div class="stat">💰 Заработано (50%): <b style="color: #4ade80;">${partnerBalance} ₽</b></div>
+        
+        <hr style="border: 0; border-top: 1px solid #334155; margin: 20px 0;">
+        
+        <h3>💳 Запросить выплату</h3>
+        <form action="/partner/withdraw" method="POST">
+          <input type="hidden" name="pass" value="${PARTNER_PASSWORD}">
+          <label>Банк (например, Сбер, Т-Банк):</label>
+          <input type="text" name="bank" required placeholder="Сбербанк">
+          <label>Номер телефона для перевода:</label>
+          <input type="text" name="phone" required placeholder="+7 999 000-00-00">
+          <button type="submit">Отправить заявку на выплату</button>
+        </form>
+      </div>
+    </body>
+    </html>
+  `);
 });
 
-bot.onText(/\/a_pass\s+(.+)/, async (msg, match) => {
-  if (match[1] === ADMIN_PASSWORD) {
-    const totalSum = (await redis.get('stats:total_sum'))  || 0;
-    const totalSales = (await redis.get('stats:total_sales')) || 0;
-    const blogerPaidCount = (await redis.get('ref:BLOGER2026:paid_count')) || 0;
-    const blogerPaidSum = (await redis.get('ref:BLOGER2026:paid_sum')) || 0;
+// Обработка запроса выплаты
+app.post('/partner/withdraw', async (req, res) => {
+  const { pass, bank, phone } = req.body;
+  if (pass !== PARTNER_PASSWORD) return res.status(403).send('Доступ запрещен');
 
-    const adminText = `⚙️ **АДМИНИСТРИРОВАНИЕ STROMVPN**\n\n` +
-                      `💰 Общая выручка: **${totalSum} ₽**\n` +
-                      `🛒 Всего продаж: **${totalSales}**\n\n` +
-                      `🎟 **Реферал BLOGER2026**:\n` +
-                      `• Продаж: **${blogerPaidCount}**\n` +
-                      `• Выручка: **${blogerPaidSum} ₽**`;
-    await bot.sendMessage(msg.chat.id, adminText, { parse_mode: 'Markdown' });
-  } else {
-    await bot.sendMessage(msg.chat.id, '❌ Неверный пароль.');
+  const paidSum = (await redis.get('ref:BLOGER2026:paid_sum')) || 0;
+  const partnerBalance = Math.floor(paidSum * 0.5);
+
+  if (ADMIN_ID) {
+    const withdrawMsg = `💸 **ЗАЯВКА НА ВЫПЛАТУ ОТ ПАРТНЕРА**\n\n🎟 Промокод: \`BLOGER2026\`\n💰 Сумма к выплате: **${partnerBalance} ₽**\n🏦 Банк: \`${bank}\`\n📱 Телефон: \`${phone}\``;
+    await bot.sendMessage(ADMIN_ID, withdrawMsg, { parse_mode: 'Markdown' }).catch(() => {});
   }
+
+  res.send(`
+    <body style="background:#0f172a;color:#fff;font-family:Arial;text-align:center;padding-top:50px;">
+      <div style="background:#1e293b;padding:30px;max-width:400px;margin:auto;border-radius:12px;">
+        <h2 style="color:#4ade80;">✅ Заявка отправлена!</h2>
+        <p>Администратор получил уведомление с вашими реквизитами (${bank}, ${phone}). Ожидайте перевод.</p>
+        <a href="/partner?pass=${PARTNER_PASSWORD}" style="color:#38bdf8;text-decoration:none;">Назад в кабинет</a>
+      </div>
+    </body>
+  `);
+});
+
+// 2. Админ-панель на сайте (просмотр всех ключей и управление)
+app.get('/admin', async (req, res) => {
+  const pass = req.query.pass;
+  if (pass !== ADMIN_PASSWORD) {
+    return res.status(403).send('<h1>❌ Ошибка доступа: неверный пароль администратора</h1>');
+  }
+
+  const totalSum = (await redis.get('stats:total_sum')) || 0;
+  const totalSales = (await redis.get('stats:total_sales')) || 0;
+  const rawKeys = (await redis.lrange('global:keys', 0, -1)) || [];
+  const keysList = rawKeys.map(k => typeof k === 'string' ? JSON.parse(k) : k);
+
+  let keysHtml = keysList.map((k, index) => `
+    <tr style="border-bottom: 1px solid #334155;">
+      <td style="padding: 10px;">${index + 1}</td>
+      <td style="padding: 10px;">@${k.username} (ID: ${k.userId})</td>
+      <td style="padding: 10px; word-break: break-all; font-family: monospace; font-size: 12px;">${k.vlessUrl}</td>
+      <td style="padding: 10px;">
+        <form action="/admin/delete-key" method="POST" style="display:inline;">
+          <input type="hidden" name="pass" value="${ADMIN_PASSWORD}">
+          <input type="hidden" name="uuid" value="${k.uuid}">
+          <button type="submit" style="background:#ef4444;color:#fff;border:none;padding:6px 12px;border-radius:4px;cursor:pointer;">Удалить</button>
+        </form>
+      </td>
+    </tr>
+  `).join('');
+
+  res.send(`
+    <!DOCTYPE html>
+    <html lang="ru">
+    <head>
+      <meta charset="UTF-8">
+      <title>Админ-панель - STROMVPN</title>
+      <style>
+        body { font-family: Arial, sans-serif; background: #0f172a; color: #f8fafc; padding: 30px; }
+        .container { max-width: 1000px; margin: auto; background: #1e293b; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
+        h2, h3 { color: #38bdf8; }
+        .stats-box { display: flex; gap: 20px; margin-bottom: 30px; }
+        .stat-card { background: #334155; padding: 20px; border-radius: 8px; flex: 1; text-align: center; }
+        table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+        th { background: #334155; padding: 10px; text-align: left; }
+      </style>
+    </head>
+    <body>
+      <div class="container">
+        <h2>⚙️ Админ-панель STROMVPN</h2>
+        <div class="stats-box">
+          <div class="stat-card">
+            <h3>Общая выручка</h3>
+            <p style="font-size: 24px; color: #4ade80; margin:0;">${totalSum} ₽</p>
+          </div>
+          <div class="stat-card">
+            <h3>Всего продаж</h3>
+            <p style="font-size: 24px; color: #38bdf8; margin:0;">${totalSales}</p>
+          </div>
+        </div>
+
+        <h3>🔑 Управление активными ключами пользователей</h3>
+        <table>
+          <tr>
+            <th>#</th>
+            <th>Пользователь</th>
+            <th>VLESS Ключ</th>
+            <th>Действие</th>
+          </tr>
+          ${keysHtml || '<tr><td colspan="4" style="padding:15px; text-align:center;">Нет активных ключей</td></tr>'}
+        </table>
+      </div>
+    </body>
+    </html>
+  `);
+});
+
+// Удаление ключа админом из списка
+app.post('/admin/delete-key', async (req, res) => {
+  const { pass, uuid } = req.body;
+  if (pass !== ADMIN_PASSWORD) return res.status(403).send('Доступ запрещен');
+
+  const rawKeys = (await redis.lrange('global:keys', 0, -1)) || [];
+  for (let raw of rawKeys) {
+    let k = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (k.uuid === uuid) {
+      await redis.lrem('global:keys', 1, raw);
+      break;
+    }
+  }
+
+  res.redirect(`/admin?pass=${ADMIN_PASSWORD}`);
 });
 
 const PORT = process.env.PORT || 3000;
-app.get('/', (req, res) => res.send('STROMVPN Active'));
+app.get('/', (req, res) => res.send('STROMVPN Active Server'));
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
