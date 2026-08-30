@@ -34,8 +34,8 @@ const ADMIN_ID = String(process.env.ADMIN_ID || '');
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'AdminSuperPass2026';
 const PARTNER_PASSWORD = process.env.PARTNER_PASSWORD || 'BloggerPass2026';
 
-// 3x-ui API конфигурация из переменных Render
-const PANEL_URL = process.env.PANEL_URL || 'https://213.176.95.147:8080';
+// 3x-ui конфигурация с учетом секретного пути панели
+const PANEL_URL = process.env.PANEL_URL || 'https://213.176.95.147:8080/xkGyZFFQ2qgbIHaItu';
 const PANEL_USERNAME = process.env.PANEL_USERNAME || '';
 const PANEL_PASSWORD = process.env.PANEL_PASSWORD || '';
 const INBOUND_ID = Number(process.env.INBOUND_ID || 1);
@@ -50,15 +50,19 @@ bot.on('polling_error', (error) => {
   }
 });
 
-// Функция авторизации и создания клиента в панели 3x-ui
+// Исправленная функция авторизации и создания клиента в панели 3x-ui
 async function createClientIn3xUi(telegramId, username) {
   try {
-    // 1. Логинимся в панель для получения куки сессии
-    const loginResponse = await axiosInstance.post(`${PANEL_URL}/login`, {
-      username: PANEL_USERNAME,
-      password: PANEL_PASSWORD
-    }, {
-      headers: { 'Content-Type': 'application/json' }
+    // Убираем слэш на конце, если он есть, чтобы корректно склеить пути
+    const baseUrl = PANEL_URL.endsWith('/') ? PANEL_URL.slice(0, -1) : PANEL_URL;
+
+    // 1. Форматируем логин для панели как URLSearchParams (решает проблему 403)
+    const params = new URLSearchParams();
+    params.append('username', PANEL_USERNAME);
+    params.append('password', PANEL_PASSWORD);
+
+    const loginResponse = await axiosInstance.post(`${baseUrl}/login`, params, {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
     });
 
     const setCookieHeader = loginResponse.headers['set-cookie'];
@@ -70,7 +74,7 @@ async function createClientIn3xUi(telegramId, username) {
     const clientUuid = uuidv4();
     const email = `tg_${telegramId}_${Date.now().toString().slice(-4)}`;
 
-    // 2. Формируем тело запроса для добавления клиента в Inbound
+    // 2. Формируем тело запроса для добавления клиента (с ограничением по времени/трафику если нужно)
     const clientData = {
       id: INBOUND_ID,
       settings: JSON.stringify({
@@ -79,8 +83,8 @@ async function createClientIn3xUi(telegramId, username) {
           flow: "",
           email: email,
           limitIp: 0,
-          totalGB: 0,
-          expiryTime: 0,
+          totalGB: 0, // Можно выставить лимит в байтах, если захочешь
+          expiryTime: 0, // 0 = бессрочно или задавать таймстамп
           enable: true,
           tgId: String(telegramId),
           subId: ""
@@ -88,8 +92,8 @@ async function createClientIn3xUi(telegramId, username) {
       })
     };
 
-    // 3. Отправляем запрос на добавление клиента
-    const addResponse = await axiosInstance.post(`${PANEL_URL}/panel/api/inbounds/addClient`, clientData, {
+    // 3. Отправляем запрос на добавление клиента в панель
+    const addResponse = await axiosInstance.post(`${baseUrl}/panel/api/inbounds/addClient`, clientData, {
       headers: {
         'Cookie': cookie,
         'Content-Type': 'application/json'
@@ -99,10 +103,13 @@ async function createClientIn3xUi(telegramId, username) {
     if (addResponse.data && addResponse.data.success) {
       console.log(`✅ Клиент ${email} успешно создан в панели 3x-ui!`);
       
-      // Собираем рабочую ссылку для клиента (IP твоего сервера и порт подключения из панели)
+      // Генерация рабочей VLESS ссылки под твои параметры
       const serverIp = '213.176.95.147';
-      const clientPort = process.env.CLIENT_PORT || '80'; // Укажи порт своего инбаунда, если не 80
-      const vlessUrl = `vless://${clientUuid}@${serverIp}:${clientPort}?type=ws&security=none&path=%2Fmyconnection&host=time.com#STROMVPN-${username}`;
+      const clientPort = process.env.CLIENT_PORT || '80'; 
+      const pathEncoded = encodeURIComponent(process.env.VLESS_PATH || '/myconnection');
+      const host = process.env.VLESS_HOST || 'time.com';
+
+      const vlessUrl = `vless://${clientUuid}@${serverIp}:${clientPort}?type=ws&security=none&path=${pathEncoded}&host=${host}#STROMVPN-${username}`;
       
       return { success: true, uuid: clientUuid, email, vlessUrl };
     } else {
@@ -294,7 +301,7 @@ bot.on('callback_query', async (query) => {
       await bot.sendMessage(chatId, '👋 **Главное меню STROMVPN**', { parse_mode: 'Markdown', reply_markup: keyboard });
     }
 
-    // Одобрение платежа и создание клиента через API 3x-ui
+    // Одобрение и создание через API панели с секретным путем
     else if (data.startsWith('approve_')) {
       const txId = data.replace('approve_', '');
       const txRaw = await redis.get(`tx:${txId}`);
@@ -321,9 +328,9 @@ bot.on('callback_query', async (query) => {
         await redis.rpush(`user:${tx.userId}:keys`, result.vlessUrl);
 
         await bot.sendMessage(tx.userId, `🎉 **Ваш платеж одобрен!**\n\n🔑 Ваш VLESS-ключ:\n\`${result.vlessUrl}\``, { parse_mode: 'Markdown' });
-        await bot.sendMessage(chatId, `✅ **Успешно создано в 3x-ui!**\n\n📧 **Email:** \`${result.email}\`\n🆔 **UUID:** \`${result.uuid}\``, { parse_mode: 'Markdown' });
+        await bot.sendMessage(chatId, `✅ **Клиент успешно добавлен в 3x-ui!**\n\n📧 **Email:** \`${result.email}\`\n🆔 **UUID:** \`${result.uuid}\``, { parse_mode: 'Markdown' });
       } else {
-        await bot.sendMessage(chatId, `❌ **Ошибка создания в 3x-ui:** ${result.error}\n\nНо транзакция помечена как одобренная.`);
+        await bot.sendMessage(chatId, `❌ **Ошибка создания в 3x-ui:** ${result.error}\n\nТранзакция помечена как одобренная.`);
       }
     }
 
@@ -364,7 +371,7 @@ bot.onText(/\/p_pass\s+(.+)/, async (msg, match) => {
 
 bot.onText(/\/a_pass\s+(.+)/, async (msg, match) => {
   if (match[1] === ADMIN_PASSWORD) {
-    const totalSum = (await redis.get('stats:total_sum')) || 0;
+    const totalSum = (await redis.get('stats:total_sum'))  || 0;
     const totalSales = (await redis.get('stats:total_sales')) || 0;
     const blogerPaidCount = (await redis.get('ref:BLOGER2026:paid_count')) || 0;
     const blogerPaidSum = (await redis.get('ref:BLOGER2026:paid_sum')) || 0;
