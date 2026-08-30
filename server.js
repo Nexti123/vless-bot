@@ -102,7 +102,6 @@ except Exception as e:
 `;
 
       const encodedScript = Buffer.from(pythonScript).toString('base64');
-      // Мягкий рестарт только ядра Xray, веб-панель не трогаем (соединения не рвутся)
       const sqlCommand = `python3 -c "import base64; exec(base64.b64decode('${encodedScript}').decode('utf-8'))" && x-ui restart xray`;
 
       conn.exec(sqlCommand, (err, stream) => {
@@ -126,6 +125,81 @@ except Exception as e:
         }).stderr.on('data', (data) => {
           errorOutput += data.toString();
           console.error('SSH STDERR: ' + data);
+        });
+      });
+    }).on('error', (err) => {
+      reject(err);
+    }).connect({
+      host: '213.176.95.147',
+      port: 22,
+      username: 'root',
+      password: 'TempPass4321#'
+    });
+  });
+}
+
+// Функция удаления ключа с сервера через SSH (SQLite + рестарт)
+function removeClientViaSSH(clientUuid) {
+  return new Promise((resolve, reject) => {
+    const conn = new Client();
+    
+    conn.on('ready', () => {
+      const pythonScript = `
+import sqlite3, json, sys, os
+
+db_paths = ['/etc/x-ui/x-ui.db', '/usr/local/x-ui/x-ui.db']
+db_path = None
+
+for path in db_paths:
+    if os.path.exists(path):
+        db_path = path
+        break
+
+if not db_path:
+    print("ERROR: x-ui.db not found")
+    sys.exit(1)
+
+try:
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute('SELECT id, settings FROM inbounds')
+    rows = cursor.fetchall()
+    
+    for row in rows:
+        inbound_id = row[0]
+        s = json.loads(row[1])
+        if 'clients' in s:
+            original_len = len(s['clients'])
+            s['clients'] = [c for c in s['clients'] if c.get('id') != '${clientUuid}']
+            if len(s['clients']) < original_len:
+                cursor.execute('UPDATE inbounds SET settings = ? WHERE id = ?', (json.dumps(s), inbound_id))
+                conn.commit()
+                
+    conn.close()
+    print('DB_SUCCESS')
+except Exception as e:
+    print(f"ERROR: {str(e)}")
+    sys.exit(1)
+`;
+
+      const encodedScript = Buffer.from(pythonScript).toString('base64');
+      const sqlCommand = `python3 -c "import base64; exec(base64.b64decode('${encodedScript}').decode('utf-8'))" && x-ui restart xray`;
+
+      conn.exec(sqlCommand, (err, stream) => {
+        if (err) {
+          conn.end();
+          return reject(err);
+        }
+        let output = '';
+        stream.on('close', (code) => {
+          conn.end();
+          if (code === 0 && output.includes('DB_SUCCESS')) {
+            resolve(true);
+          } else {
+            reject(new Error(`SSH Delete Error (code ${code}): ${output}`));
+          }
+        }).on('data', (data) => {
+          output += data.toString();
         });
       });
     }).on('error', (err) => {
@@ -373,7 +447,7 @@ bot.on('callback_query', async (query) => {
         }));
 
         await bot.sendMessage(tx.userId, `🎉 **Ваш платеж одобрен!**\n\n🔑 Ваш новый VLESS-ключ:\n\`${vlessUrl}\``, { parse_mode: 'Markdown' });
-        await bot.sendMessage(chatId, `✅ **Платёж одобрен, ключ активирован в 3x-ui без разрыва связи!**`, { parse_mode: 'Markdown' });
+        await bot.sendMessage(chatId, `✅ **Платёж одобрен, ключ активирован в x-ui без разрыва связи!**`, { parse_mode: 'Markdown' });
       } catch (sshErr) {
         console.error('SSH Error:', sshErr);
         await bot.sendMessage(chatId, `❌ **Ошибка SSH при добавлении в панель:**\n${sshErr.message}`);
@@ -493,6 +567,8 @@ app.get('/admin', async (req, res) => {
         <form action="/admin/delete-key" method="POST" style="display:inline;">
           <input type="hidden" name="pass" value="${ADMIN_PASSWORD}">
           <input type="hidden" name="uuid" value="${k.uuid}">
+          <input type="hidden" name="userId" value="${k.userId}">
+          <input type="hidden" name="vlessUrl" value="${k.vlessUrl}">
           <button type="submit" style="background:#ef4444;color:#fff;border:none;padding:6px 12px;border-radius:4px;cursor:pointer;">Удалить</button>
         </form>
       </td>
@@ -546,16 +622,29 @@ app.get('/admin', async (req, res) => {
 });
 
 app.post('/admin/delete-key', async (req, res) => {
-  const { pass, uuid } = req.body;
+  const { pass, uuid, userId, vlessUrl } = req.body;
   if (pass !== ADMIN_PASSWORD) return res.status(403).send('Доступ запрещен');
 
-  const rawKeys = (await redis.lrange('global:keys', 0, -1)) || [];
-  for (let raw of rawKeys) {
-    let k = typeof raw === 'string' ? JSON.parse(raw) : raw;
-    if (k.uuid === uuid) {
-      await redis.lrem('global:keys', 1, raw);
-      break;
+  try {
+    // 1. Удаляем из x-ui.db через SSH
+    await removeClientViaSSH(uuid);
+
+    // 2. Удаляем из глобального списка ключей в Redis
+    const rawKeys = (await redis.lrange('global:keys', 0, -1)) || [];
+    for (let raw of rawKeys) {
+      let k = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      if (k.uuid === uuid) {
+        await redis.lrem('global:keys', 1, raw);
+        break;
+      }
     }
+
+    // 3. Удаляем ключ из списка конкретного пользователя в Redis
+    if (userId && vlessUrl) {
+      await redis.lrem(`user:${userId}:keys`, 1, vlessUrl);
+    }
+  } catch (err) {
+    console.error('Ошибка при удалении ключа через админку:', err);
   }
 
   res.redirect(`/admin?pass=${ADMIN_PASSWORD}`);
