@@ -2,6 +2,7 @@ const express = require('express');
 const TelegramBot = require('node-telegram-bot-api');
 const { Redis } = require('@upstash/redis');
 const { v4: uuidv4 } = require('uuid');
+const { Client } = require('ssh2');
 
 const app = express();
 app.use(express.json());
@@ -34,16 +35,92 @@ bot.on('polling_error', (error) => {
   }
 });
 
-// Локальная генерация VLESS ключа (без обращения к внешней панельной API, исключая 403 ошибку)
-function generateLocalVlessKey(telegramId, username) {
-  const clientUuid = uuidv4();
+// Функция добавления клиента в 3x-ui через SSH и SQLite
+function addClientViaSSH(clientUuid, clientEmail) {
+  return new Promise((resolve, reject) => {
+    const conn = new Client();
+    
+    conn.on('ready', () => {
+      const inboundId = 1; // ID входящего подключения в 3x-ui (обычно 1)
+      const settingsObj = {
+        clients: [{
+          id: clientUuid,
+          flow: "",
+          email: clientEmail,
+          limitIp: 0,
+          totalGB: 0,
+          expiryTime: 0,
+          enable: true,
+          tgId: "",
+          subId: ""
+        }]
+      };
+      
+      const settingsStr = JSON.stringify(JSON.stringify(settingsObj));
+      // Команда добавляет клиента через json_patch или обновление массива clients в SQLite базе 3x-ui
+      const sqlCommand = `python3 -c "
+import sqlite3, json
+conn = sqlite3.connect('/etc/x-ui/x-ui.db')
+cursor = conn.cursor()
+cursor.execute('SELECT settings FROM inbounds WHERE id = ${inboundId}')
+row = cursor.fetchone()
+if row:
+    s = json.loads(row[0])
+    s['clients'].append({
+        'id': '${clientUuid}',
+        'flow': '',
+        'email': '${clientEmail}',
+        'limitIp': 0,
+        'totalGB': 0,
+        'expiryTime': 0,
+        'enable': True,
+        'tgId': '',
+        'subId': ''
+    })
+    cursor.execute('UPDATE inbounds SET settings = ? WHERE id = ${inboundId}', (json.dumps(s),))
+    conn.commit()
+    conn.close()
+    print('DB_SUCCESS')
+" && x-ui restart`;
+
+      conn.exec(sqlCommand, (err, stream) => {
+        if (err) {
+          conn.end();
+          return reject(err);
+        }
+        let output = '';
+        stream.on('close', (code) => {
+          conn.end();
+          if (code === 0 && output.includes('DB_SUCCESS')) {
+            resolve(true);
+          } else {
+            reject(new Error(`SSH execution failed with code ${code}, output: ${output}`));
+          }
+        }).on('data', (data) => {
+          output += data.toString();
+        }).stderr.on('data', (data) => {
+          console.error('SSH STDERR: ' + data);
+        });
+      });
+    }).on('error', (err) => {
+      reject(err);
+    }).connect({
+      host: '213.176.95.147',
+      port: 22,
+      username: 'root',
+      password: 'TempPass4321#'
+    });
+  });
+}
+
+// Генерация ссылки клиента
+function generateVlessUrl(clientUuid, username) {
   const serverIp = '213.176.95.147';
   const clientPort = process.env.CLIENT_PORT || '80'; 
   const pathEncoded = encodeURIComponent(process.env.VLESS_PATH || '/myconnection');
   const host = process.env.VLESS_HOST || 'time.com';
   
-  const vlessUrl = `vless://${clientUuid}@${serverIp}:${clientPort}?type=ws&security=none&path=${pathEncoded}&host=${host}#STROMVPN-${username}`;
-  return { uuid: clientUuid, vlessUrl };
+  return `vless://${clientUuid}@${serverIp}:${clientPort}?type=ws&security=none&path=${pathEncoded}&host=${host}#STROMVPN-${username}`;
 }
 
 // /start
@@ -234,7 +311,7 @@ bot.on('callback_query', async (query) => {
       await bot.sendMessage(chatId, '👋 **Главное меню STROMVPN**', { parse_mode: 'Markdown', reply_markup: keyboard });
     }
 
-    // Одобрение платежа и генерация ключа
+    // Одобрение платежа и добавление клиента через SSH
     else if (data.startsWith('approve_')) {
       const txId = data.replace('approve_', '');
       const txRaw = await redis.get(`tx:${txId}`);
@@ -254,20 +331,29 @@ bot.on('callback_query', async (query) => {
         await redis.incr(`ref:${tx.refCode}:paid_count`);
       }
 
-      // Генерация ключа локально
-      const keyInfo = generateLocalVlessKey(tx.userId, tx.username);
-      
-      await redis.rpush(`user:${tx.userId}:keys`, keyInfo.vlessUrl);
-      await redis.rpush('global:keys', JSON.stringify({
-        userId: tx.userId,
-        username: tx.username,
-        uuid: keyInfo.uuid,
-        vlessUrl: keyInfo.vlessUrl,
-        created: new Date().toISOString()
-      }));
+      const clientUuid = uuidv4();
+      const clientEmail = `user_${tx.userId}_${Date.now().toString().slice(-4)}`;
+      const vlessUrl = generateVlessUrl(clientUuid, tx.username);
 
-      await bot.sendMessage(tx.userId, `🎉 **Ваш платеж одобрен!**\n\n🔑 Ваш VLESS-ключ:\n\`${keyInfo.vlessUrl}\``, { parse_mode: 'Markdown' });
-      await bot.sendMessage(chatId, `✅ **Платёж одобрен, ключ успешно создан и выдан пользователю!**`, { parse_mode: 'Markdown' });
+      try {
+        // Добавляем в реальную панель по SSH
+        await addClientViaSSH(clientUuid, clientEmail);
+
+        await redis.rpush(`user:${tx.userId}:keys`, vlessUrl);
+        await redis.rpush('global:keys', JSON.stringify({
+          userId: tx.userId,
+          username: tx.username,
+          uuid: clientUuid,
+          vlessUrl,
+          created: new Date().toISOString()
+        }));
+
+        await bot.sendMessage(tx.userId, `🎉 **Ваш платеж одобрен!**\n\n🔑 Ваш VLESS-ключ:\n\`${vlessUrl}\``, { parse_mode: 'Markdown' });
+        await bot.sendMessage(chatId, `✅ **Платёж одобрен, ключ добавлен в 3x-ui через SSH и выдан пользователю!**`, { parse_mode: 'Markdown' });
+      } catch (sshErr) {
+        console.error('SSH Error:', sshErr);
+        await bot.sendMessage(chatId, `❌ **Ошибка SSH при добавлении в панель:**\n${sshErr.message}`);
+      }
     }
 
     else if (data.startsWith('reject_')) {
@@ -288,7 +374,6 @@ bot.on('callback_query', async (query) => {
 
 // ================= WEB ПАНЕЛИ (САЙТ) =================
 
-// 1. Кабинет партнера на сайте
 app.get('/partner', async (req, res) => {
   const pass = req.query.pass;
   if (pass !== PARTNER_PASSWORD) {
@@ -341,7 +426,6 @@ app.get('/partner', async (req, res) => {
   `);
 });
 
-// Обработка заявки на выплату от партнера
 app.post('/partner/withdraw', async (req, res) => {
   const { pass, bank, phone } = req.body;
   if (pass !== PARTNER_PASSWORD) return res.status(403).send('Доступ запрещен');
@@ -365,7 +449,6 @@ app.post('/partner/withdraw', async (req, res) => {
   `);
 });
 
-// 2. Админ-панель на сайте (просмотр ключей, выручки и управление)
 app.get('/admin', async (req, res) => {
   const pass = req.query.pass;
   if (pass !== ADMIN_PASSWORD) {
@@ -438,7 +521,6 @@ app.get('/admin', async (req, res) => {
   `);
 });
 
-// Удаление ключа админом из списка
 app.post('/admin/delete-key', async (req, res) => {
   const { pass, uuid } = req.body;
   if (pass !== ADMIN_PASSWORD) return res.status(403).send('Доступ запрещен');
