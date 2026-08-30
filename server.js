@@ -2,11 +2,19 @@ const express = require('express');
 const TelegramBot = require('node-telegram-bot-api');
 const { Redis } = require('@upstash/redis');
 const { v4: uuidv4 } = require('uuid');
+const axios = require('axios');
+const https = require('https');
 
 const app = express();
 app.use(express.json());
 
-// Инициализация бота с настройками опроса для предотвращения конфликтов 409
+// Игнорируем самоподписанные SSL-сертификаты панели
+const axiosInstance = axios.create({
+  httpsAgent: new https.Agent({  
+    rejectUnauthorized: false
+  })
+});
+
 const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, {
   polling: {
     interval: 300,
@@ -26,6 +34,12 @@ const ADMIN_ID = String(process.env.ADMIN_ID || '');
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'AdminSuperPass2026';
 const PARTNER_PASSWORD = process.env.PARTNER_PASSWORD || 'BloggerPass2026';
 
+// 3x-ui API конфигурация из переменных Render
+const PANEL_URL = process.env.PANEL_URL || 'https://213.176.95.147:8080';
+const PANEL_USERNAME = process.env.PANEL_USERNAME || '';
+const PANEL_PASSWORD = process.env.PANEL_PASSWORD || '';
+const INBOUND_ID = Number(process.env.INBOUND_ID || 1);
+
 const userStates = {};
 
 bot.on('polling_error', (error) => {
@@ -36,14 +50,68 @@ bot.on('polling_error', (error) => {
   }
 });
 
-// Генератор VLESS+WS ссылки под твои настройки из панели (ID 1)
-function generateVlessLink(email, uuid) {
-  const serverIp = process.env.SERVER_IP || '213.176.95.147';
-  const vlessPort = process.env.VLESS_PORT || '80';
-  const host = process.env.VLESS_HOST || 'time.com';
-  const path = encodeURIComponent(process.env.VLESS_PATH || '/myconnection');
+// Функция авторизации и создания клиента в панели 3x-ui
+async function createClientIn3xUi(telegramId, username) {
+  try {
+    // 1. Логинимся в панель для получения куки сессии
+    const loginResponse = await axiosInstance.post(`${PANEL_URL}/login`, {
+      username: PANEL_USERNAME,
+      password: PANEL_PASSWORD
+    }, {
+      headers: { 'Content-Type': 'application/json' }
+    });
 
-  return `vless://${uuid}@${serverIp}:${vlessPort}?type=ws&security=none&path=${path}&host=${host}#STROMVPN-${email}`;
+    const setCookieHeader = loginResponse.headers['set-cookie'];
+    if (!setCookieHeader) {
+      throw new Error('Не удалось получить сессию от 3x-ui (нет кук)');
+    }
+
+    const cookie = setCookieHeader.join(';');
+    const clientUuid = uuidv4();
+    const email = `tg_${telegramId}_${Date.now().toString().slice(-4)}`;
+
+    // 2. Формируем тело запроса для добавления клиента в Inbound
+    const clientData = {
+      id: INBOUND_ID,
+      settings: JSON.stringify({
+        clients: [{
+          id: clientUuid,
+          flow: "",
+          email: email,
+          limitIp: 0,
+          totalGB: 0,
+          expiryTime: 0,
+          enable: true,
+          tgId: String(telegramId),
+          subId: ""
+        }]
+      })
+    };
+
+    // 3. Отправляем запрос на добавление клиента
+    const addResponse = await axiosInstance.post(`${PANEL_URL}/panel/api/inbounds/addClient`, clientData, {
+      headers: {
+        'Cookie': cookie,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    if (addResponse.data && addResponse.data.success) {
+      console.log(`✅ Клиент ${email} успешно создан в панели 3x-ui!`);
+      
+      // Собираем рабочую ссылку для клиента (IP твоего сервера и порт подключения из панели)
+      const serverIp = '213.176.95.147';
+      const clientPort = process.env.CLIENT_PORT || '80'; // Укажи порт своего инбаунда, если не 80
+      const vlessUrl = `vless://${clientUuid}@${serverIp}:${clientPort}?type=ws&security=none&path=%2Fmyconnection&host=time.com#STROMVPN-${username}`;
+      
+      return { success: true, uuid: clientUuid, email, vlessUrl };
+    } else {
+      throw new Error(addResponse.data.msg || 'Ошибка API панели');
+    }
+  } catch (err) {
+    console.error('❌ Ошибка интеграции с 3x-ui:', err.message);
+    return { success: false, error: err.message };
+  }
 }
 
 // /start
@@ -80,7 +148,7 @@ bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
   }
 });
 
-// Обработка текстовых сообщений (Промокоды и Техподдержка)
+// Обработка текстовых сообщений
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const userId = String(msg.from.id);
@@ -88,7 +156,6 @@ bot.on('message', async (msg) => {
 
   if (text.startsWith('/')) return;
 
-  // Если пользователь пишет ответ администратору через техподдержку
   if (userStates[userId] && userStates[userId].startsWith('support_reply_')) {
     const targetUserId = userStates[userId].replace('support_reply_', '');
     delete userStates[userId];
@@ -97,12 +164,11 @@ bot.on('message', async (msg) => {
       await bot.sendMessage(targetUserId, `💬 **Ответ от техподдержки:**\n\n${text}`, { parse_mode: 'Markdown' });
       await bot.sendMessage(chatId, '✅ **Ответ успешно отправлен пользователю!**', { parse_mode: 'Markdown' });
     } catch (err) {
-      await bot.sendMessage(chatId, '❌ Не удалось отправить сообщение пользователю (возможно, он заблокировал бота).');
+      await bot.sendMessage(chatId, '❌ Не удалось отправить сообщение пользователю.');
     }
     return;
   }
 
-  // Если пользователь находится в режиме ввода промокода
   if (userStates[userId] === 'awaiting_promo') {
     delete userStates[userId];
     if (text.toUpperCase() === 'BLOGER2026') {
@@ -114,31 +180,22 @@ bot.on('message', async (msg) => {
     return;
   }
 
-  // Если пользователь находится в режиме общения с техподдержкой (пишет вопрос)
   if (userStates[userId] === 'support_chat') {
-    delete userStates[userId]; // Сбрасываем состояние, чтобы сообщения дальше шли как обычные
-
+    delete userStates[userId];
     const username = msg.from.username || 'Без_username';
     const firstName = msg.from.first_name || 'Пользователь';
 
     await bot.sendMessage(chatId, '✅ **Ваше сообщение отправлено в техподдержку.** Ожидайте ответ!');
 
     if (ADMIN_ID) {
-      const supportMsg = `💬 **ВОПРОС В ПОДДЕРЖКУ**\n\n` +
-                         `👤 От: @${username} (${firstName})\n` +
-                         `🆔 ID: \`${userId}\`\n\n` +
-                         `📝 **Текст:**\n${text}`;
-
+      const supportMsg = `💬 **ВОПРОС В ПОДДЕРЖКУ**\n\n👤 От: @${username} (${firstName})\n🆔 ID: \`${userId}\`\n\n📝 **Текст:**\n${text}`;
       const supportKeyboard = {
-        inline_keyboard: [[
-          { text: '✍️ Ответить', callback_data: `reply_support_${userId}` }
-        ]]
+        inline_keyboard: [[{ text: '✍️ Ответить', callback_data: `reply_support_${userId}` }]]
       };
-
       try {
         await bot.sendMessage(ADMIN_ID, supportMsg, { parse_mode: 'Markdown', reply_markup: supportKeyboard });
       } catch (err) {
-        console.error('⚠️ Ошибка отправки сообщения техподдержки админу:', err.message);
+        console.error('⚠️ Ошибка техподдержки админу:', err.message);
       }
     }
   }
@@ -155,11 +212,8 @@ bot.on('callback_query', async (query) => {
   try {
     if (data === 'support') {
       userStates[userId] = 'support_chat';
-      const supportText = `💬 **Служба технической поддержки**\n\n` +
-                          `Опишите вашу проблему или задайте вопрос следующим сообщением в этот чат, и администратор ответит вам в ближайшее время.`;
-      const backKeyboard = {
-        inline_keyboard: [[{ text: '◀️ В главное меню', callback_data: 'main_menu' }]]
-      };
+      const supportText = `💬 **Служба технической поддержки**\n\nОпишите вашу проблему следующим сообщением в этот чат.`;
+      const backKeyboard = { inline_keyboard: [[{ text: '◀️ В главное меню', callback_data: 'main_menu' }]] };
       await bot.sendMessage(chatId, supportText, { parse_mode: 'Markdown', reply_markup: backKeyboard });
     }
 
@@ -176,12 +230,8 @@ bot.on('callback_query', async (query) => {
 
     else if (data === 'buy_access') {
       let activePromo = (await redis.get(`user:${userId}:ref`)) || 'Отсутствует';
-
-      const payText = `💳 **ОПЛАТА ПО СБП**\n\n` +
-                      `Сумма к оплате: **250 ₽**\n` +
-                      `🎟 Промокод: **${activePromo}**\n\n` +
+      const payText = `💳 **ОПЛАТА ПО СБП**\n\nСумма к оплате: **250 ₽**\n🎟 Промокод: **${activePromo}**\n\n` +
                       `**Реквизиты:** ИП Малыгин М. Е.\n` +
-                      `**Назначение:** Оплата за услуги предоставления удалённого доступа к серверу. Без НДС.\n\n` +
                       `Переведите 250 ₽ по СБП и нажмите **«Я оплатил»**.`;
 
       const payKeyboard = {
@@ -191,7 +241,6 @@ bot.on('callback_query', async (query) => {
           [{ text: '◀️ Назад', callback_data: 'main_menu' }]
         ]
       };
-
       await bot.sendMessage(chatId, payText, { parse_mode: 'Markdown', reply_markup: payKeyboard });
     }
 
@@ -217,7 +266,7 @@ bot.on('callback_query', async (query) => {
         try {
           await bot.sendMessage(ADMIN_ID, adminMsg, { parse_mode: 'Markdown', reply_markup: adminKeyboard });
         } catch (err) {
-          console.error('⚠️ Ошибка отправки уведомления админу:', err.message);
+          console.error('⚠️ Ошибка уведомления админу:', err.message);
         }
       }
     }
@@ -232,7 +281,6 @@ bot.on('callback_query', async (query) => {
 
     else if (data === 'main_menu') {
       delete userStates[userId];
-      const welcomeText = `👋 **Главное меню STROMVPN**`;
       const keyboard = {
         inline_keyboard: [
           [{ text: '🛒 Купить доступ (250 ₽)', callback_data: 'buy_access' }],
@@ -243,9 +291,10 @@ bot.on('callback_query', async (query) => {
           [{ text: '⚙️ Админ-панель', callback_data: 'admin_login' }]
         ]
       };
-      await bot.sendMessage(chatId, welcomeText, { parse_mode: 'Markdown', reply_markup: keyboard });
+      await bot.sendMessage(chatId, '👋 **Главное меню STROMVPN**', { parse_mode: 'Markdown', reply_markup: keyboard });
     }
 
+    // Одобрение платежа и создание клиента через API 3x-ui
     else if (data.startsWith('approve_')) {
       const txId = data.replace('approve_', '');
       const txRaw = await redis.get(`tx:${txId}`);
@@ -265,16 +314,17 @@ bot.on('callback_query', async (query) => {
         await redis.incr(`ref:${tx.refCode}:paid_count`);
       }
 
-      const clientUuid = uuidv4();
-      const email = `user_${tx.userId}_${Date.now().toString().slice(-4)}`;
-      const vlessUrl = generateVlessLink(email, clientUuid);
+      // Создаем клиента в панели 3x-ui
+      const result = await createClientIn3xUi(tx.userId, tx.username);
 
-      await redis.rpush(`user:${tx.userId}:keys`, vlessUrl);
+      if (result.success) {
+        await redis.rpush(`user:${tx.userId}:keys`, result.vlessUrl);
 
-      await bot.sendMessage(tx.userId, `🎉 **Ваш платеж одобрен!**\n\n🔑 Ваш VLESS-ключ:\n\`${vlessUrl}\``, { parse_mode: 'Markdown' });
-      await bot.sendMessage(chatId, `✅ **Успешно!** Ключ отправлен пользователю.\n\n` +
-                                     `🆔 **UUID:** \`${clientUuid}\`\n` +
-                                     `📧 **Email:** \`${email}\``, { parse_mode: 'Markdown' });
+        await bot.sendMessage(tx.userId, `🎉 **Ваш платеж одобрен!**\n\n🔑 Ваш VLESS-ключ:\n\`${result.vlessUrl}\``, { parse_mode: 'Markdown' });
+        await bot.sendMessage(chatId, `✅ **Успешно создано в 3x-ui!**\n\n📧 **Email:** \`${result.email}\`\n🆔 **UUID:** \`${result.uuid}\``, { parse_mode: 'Markdown' });
+      } else {
+        await bot.sendMessage(chatId, `❌ **Ошибка создания в 3x-ui:** ${result.error}\n\nНо транзакция помечена как одобренная.`);
+      }
     }
 
     else if (data.startsWith('reject_')) {
@@ -306,7 +356,6 @@ bot.onText(/\/p_pass\s+(.+)/, async (msg, match) => {
     const clicks = (await redis.get('ref:BLOGER2026:clicks')) || 0;
     const paidCount = (await redis.get('ref:BLOGER2026:paid_count')) || 0;
     const paidSum = (await redis.get('ref:BLOGER2026:paid_sum')) || 0;
-
     await bot.sendMessage(msg.chat.id, `📊 **ПАРТНЕР (BLOGER2026)**\n\n🖱 Кликов: **${clicks}**\n💳 Оплат: **${paidCount}**\n💰 50%: **${Math.floor(paidSum * 0.5)} ₽**`, { parse_mode: 'Markdown' });
   } else {
     await bot.sendMessage(msg.chat.id, '❌ Неверный пароль.');
@@ -317,7 +366,6 @@ bot.onText(/\/a_pass\s+(.+)/, async (msg, match) => {
   if (match[1] === ADMIN_PASSWORD) {
     const totalSum = (await redis.get('stats:total_sum')) || 0;
     const totalSales = (await redis.get('stats:total_sales')) || 0;
-    
     const blogerPaidCount = (await redis.get('ref:BLOGER2026:paid_count')) || 0;
     const blogerPaidSum = (await redis.get('ref:BLOGER2026:paid_sum')) || 0;
 
@@ -326,9 +374,7 @@ bot.onText(/\/a_pass\s+(.+)/, async (msg, match) => {
                       `🛒 Всего продаж: **${totalSales}**\n\n` +
                       `🎟 **Реферал BLOGER2026**:\n` +
                       `• Продаж: **${blogerPaidCount}**\n` +
-                      `• Выручка: **${blogerPaidSum} ₽**\n` +
-                      `• Выплата партнеру (50%): **${Math.floor(blogerPaidSum * 0.5)} ₽**`;
-
+                      `• Выручка: **${blogerPaidSum} ₽**`;
     await bot.sendMessage(msg.chat.id, adminText, { parse_mode: 'Markdown' });
   } else {
     await bot.sendMessage(msg.chat.id, '❌ Неверный пароль.');
