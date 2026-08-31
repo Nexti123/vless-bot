@@ -137,7 +137,6 @@ bot.on('callback_query', async (query) => {
       const cancelKeyboard = { inline_keyboard: [[{ text: '◀️ Назад в меню', callback_data: 'main_menu' }]] };
       await bot.sendMessage(chatId, '🎟 **Отправьте промокод сообщением в этот чат:**', { parse_mode: 'Markdown', reply_markup: cancelKeyboard });
     }
-    // Конструктор тарифов
     else if (data === 'buy_access') {
       const text = `🛒 **Выберите тарифный план:**\n\n` +
                    `🔹 **Тест (7 дней)** — 90 ₽\n` +
@@ -164,10 +163,20 @@ bot.on('callback_query', async (query) => {
       await redis.set(`user:${userId}:pending_order`, JSON.stringify({ amount, days, title }));
 
       let activePromo = (await redis.get(`user:${userId}:ref`)) || 'Отсутствует';
-      const payText = `💳 **ОПЛАТА ТАРИФА: ${title}**\n\nСумма к оплате: **${amount} ₽**\n🎟 Промокод: **${activePromo}**\n\n` +
-                      `Переведите ${amount} ₽ по СБП и нажмите **«Я оплатил»**.\n*(Реквизиты уточняйте в поддержке или настройте свой номер)*`;
+      let paymentLink = `https://t.tb.ru/c2c-qr-choose-bank?requisiteNumber=+79831294703&bankCode=100000000004`;
+
+      const payText = `💳 **ОПЛАТА ТАРИФА: ${title}**\n\n` +
+                      `Сумма к оплате: **${amount} ₽**\n` +
+                      `🎟 Промокод: **${activePromo}**\n\n` +
+                      `📋 **Инструкция по оплате:**\n` +
+                      `1. Нажмите кнопку **«🌐 Оплатить ${amount} ₽»** ниже.\n` +
+                      `2. В открывшемся приложении банка выберите свой банк и **обязательно укажите сумму ${amount} ₽**.\n` +
+                      `3. Подтвердите перевод.\n` +
+                      `4. Вернитесь в бота и нажмите кнопку **«✅ Я оплатил»**.`;
+
       const payKeyboard = {
         inline_keyboard: [
+          [{ text: `🌐 Оплатить ${amount} ₽`, url: paymentLink }],
           [{ text: '✅ Я оплатил', callback_data: 'submit_payment' }],
           [{ text: '🎟 Ввести промокод', callback_data: 'enter_promo' }],
           [{ text: '◀️ К выбору тарифов', callback_data: 'buy_access' }]
@@ -200,7 +209,6 @@ bot.on('callback_query', async (query) => {
         await bot.sendMessage(ADMIN_ID, adminMsg, { parse_mode: 'Markdown', reply_markup: adminKeyboard }).catch(() => {});
       }
     }
-    // Личный кабинет со шкалой подписки
     else if (data === 'my_keys') {
       let keys = (await redis.lrange(`user:${userId}:keys`, 0, -1)) || [];
       let expireRaw = await redis.get(`user:${userId}:expire`);
@@ -242,7 +250,6 @@ bot.on('callback_query', async (query) => {
       };
       await bot.sendMessage(chatId, text, { parse_mode: 'Markdown', reply_markup: kb });
     }
-    // Автоматическая диагностика
     else if (data === 'diagnostics') {
       let keys = (await redis.lrange(`user:${userId}:keys`, 0, -1)) || [];
       let expireRaw = await redis.get(`user:${userId}:expire`);
@@ -297,7 +304,6 @@ bot.on('callback_query', async (query) => {
       delete userStates[userId];
       await bot.sendMessage(chatId, '👋 **Главное меню STROMVPN**', { parse_mode: 'Markdown', reply_markup: getMainMenuKeyboard() });
     }
-    // Одобрение платежа
     else if (data.startsWith('approve_')) {
       const txId = data.replace('approve_', '');
       const txRaw = await redis.get(`tx:${txId}`);
