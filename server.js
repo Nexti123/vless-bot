@@ -137,17 +137,16 @@ bot.on('callback_query', async (query) => {
       const cancelKeyboard = { inline_keyboard: [[{ text: '◀️ Назад в меню', callback_data: 'main_menu' }]] };
       await bot.sendMessage(chatId, '🎟 **Отправьте промокод сообщением в этот чат:**', { parse_mode: 'Markdown', reply_markup: cancelKeyboard });
     }
-    // ФУНКЦИЯ №4: Конструктор тарифов
+    // Конструктор тарифов
     else if (data === 'buy_access') {
       const text = `🛒 **Выберите тарифный план:**\n\n` +
                    `🔹 **Тест (7 дней)** — 90 ₽\n` +
                    `⭐ **Стандарт (30 дней)** — 250 ₽\n` +
-                   `🔥 **Выгодный (90 дней)** — 650 ₽ *(скидка 15%)*\n` +
-                   `👨‍👩‍👦 **Семейный пакет (3 ключа / 30 дней)** — 550 ₽ *(Фича №8)*`;
+                   `🔥 **Выгодный (90 дней)** — 650 ₽ *(скидка 15%)*`;
       const kb = {
         inline_keyboard: [
           [{ text: '🔹 7 дней (90 ₽)', callback_data: 'plan_7' }, { text: '⭐ 30 дней (250 ₽)', callback_data: 'plan_30' }],
-          [{ text: '🔥 90 дней (650 ₽)', callback_data: 'plan_90' }, { text: '👨‍👩‍👦 Семейный 3 ключа (550 ₽)', callback_data: 'plan_family' }],
+          [{ text: '🔥 90 дней (650 ₽)', callback_data: 'plan_90' }],
           [{ text: '◀️ Назад', callback_data: 'main_menu' }]
         ]
       };
@@ -157,19 +156,16 @@ bot.on('callback_query', async (query) => {
       const planType = data.replace('plan_', '');
       let amount = 250;
       let days = 30;
-      let count = 1;
       let title = '30 дней (Стандарт)';
 
       if (planType === '7') { amount = 90; days = 7; title = '7 дней (Тест)'; }
       else if (planType === '90') { amount = 650; days = 90; title = '90 дней (Выгодный)'; }
-      else if (planType === 'family') { amount = 550; days = 30; count = 3; title = 'Семейный (3 ключа)'; }
 
-      await redis.set(`user:${userId}:pending_order`, JSON.stringify({ amount, days, count, title }));
+      await redis.set(`user:${userId}:pending_order`, JSON.stringify({ amount, days, title }));
 
       let activePromo = (await redis.get(`user:${userId}:ref`)) || 'Отсутствует';
       const payText = `💳 **ОПЛАТА ТАРИФА: ${title}**\n\nСумма к оплате: **${amount} ₽**\n🎟 Промокод: **${activePromo}**\n\n` +
-                      `**Реквизиты:** ИП Малыгин М. Е.\n` +
-                      `Переведите ${amount} ₽ по СБП и нажмите **«Я оплатил»**.`;
+                      `Переведите ${amount} ₽ по СБП и нажмите **«Я оплатил»**.\n*(Реквизиты уточняйте в поддержке или настройте свой номер)*`;
       const payKeyboard = {
         inline_keyboard: [
           [{ text: '✅ Я оплатил', callback_data: 'submit_payment' }],
@@ -186,12 +182,12 @@ bot.on('callback_query', async (query) => {
       const firstName = query.from.first_name || 'Пользователь';
 
       let orderRaw = await redis.get(`user:${userId}:pending_order`);
-      let order = orderRaw ? (typeof orderRaw === 'string' ? JSON.parse(orderRaw) : orderRaw) : { amount: 250, days: 30, count: 1, title: '30 дней' };
+      let order = orderRaw ? (typeof orderRaw === 'string' ? JSON.parse(orderRaw) : orderRaw) : { amount: 250, days: 30, title: '30 дней' };
 
-      const txData = { txId, userId, username, firstName, amount: order.amount, days: order.days, count: order.count, status: 'pending', refCode };
+      const txData = { txId, userId, username, firstName, amount: order.amount, days: order.days, status: 'pending', refCode };
       await redis.set(`tx:${txId}`, JSON.stringify(txData));
 
-      await bot.sendMessage(chatId, '⏳ **Ваш платеж отправлен на проверку.**\nКлюч(и) придут сразу после подтверждения.');
+      await bot.sendMessage(chatId, '⏳ **Ваш платеж отправлен на проверку.**\nКлюч придет сразу после подтверждения.');
 
       if (ADMIN_ID) {
         const adminMsg = `💳 **НОВЫЙ ПЛАТЕЖ (${order.title})**\n\n👤 @${username} (${firstName})\n🆔 \`${userId}\`\n💰 ${order.amount} ₽\n🎟 Промокод: \`${refCode}\`\n🏷 ID: \`${txId}\``;
@@ -204,7 +200,7 @@ bot.on('callback_query', async (query) => {
         await bot.sendMessage(ADMIN_ID, adminMsg, { parse_mode: 'Markdown', reply_markup: adminKeyboard }).catch(() => {});
       }
     }
-    // ФУНКЦИЯ №2: Личный кабинет со шкалой подписки
+    // Личный кабинет со шкалой подписки
     else if (data === 'my_keys') {
       let keys = (await redis.lrange(`user:${userId}:keys`, 0, -1)) || [];
       let expireRaw = await redis.get(`user:${userId}:expire`);
@@ -215,8 +211,7 @@ bot.on('callback_query', async (query) => {
       let now = Date.now();
       let daysLeft = Math.max(0, Math.ceil((expireTime - now) / (1000 * 60 * 60 * 24)));
       
-      // Генерация красивого прогресс-бара
-      let totalDurationDays = 30; // Базово
+      let totalDurationDays = 30;
       let progressPercent = Math.min(100, Math.max(0, Math.floor((daysLeft / totalDurationDays) * 100)));
       let filledBlocks = Math.floor(progressPercent / 10);
       let progressBar = '█'.repeat(filledBlocks) + '░'.repeat(10 - filledBlocks);
@@ -247,7 +242,7 @@ bot.on('callback_query', async (query) => {
       };
       await bot.sendMessage(chatId, text, { parse_mode: 'Markdown', reply_markup: kb });
     }
-    // ФУНКЦИЯ №6: Автоматическая диагностика («Починить подключение»)
+    // Автоматическая диагностика
     else if (data === 'diagnostics') {
       let keys = (await redis.lrange(`user:${userId}:keys`, 0, -1)) || [];
       let expireRaw = await redis.get(`user:${userId}:expire`);
@@ -258,30 +253,30 @@ bot.on('callback_query', async (query) => {
       let hasError = false;
 
       if (keys.length > 0) {
-        diagTest += `✅ Ключи в системе: **Найдены (${keys.length} шт.)**\n`;
+        diagText += `✅ Ключи в системе: **Найдены (${keys.length} шт.)**\n`;
       } else {
-        diagTest += `❌ Ключи в системе: **Отсутствуют**\n`;
+        diagText += `❌ Ключи в системе: **Отсутствуют**\n`;
         hasError = true;
       }
 
       if (expireTime > now) {
         let daysLeft = Math.ceil((expireTime - now) / (1000 * 60 * 60 * 24));
-        diagTest += `✅ Статус подписки: **Активна (еще ${daysLeft} дн.)**\n`;
+        diagText += `✅ Статус подписки: **Активна (еще ${daysLeft} дн.)**\n`;
       } else {
-        diagTest += `❌ Статус подписки: **Истекла или не оплачена**\n`;
+        diagText += `❌ Статус подписки: **Истекла или не оплачена**\n`;
         hasError = true;
       }
 
-      diagTest += `✅ Доступность сервера: **Стабильно (Пинг 38мс)**\n\n`;
+      diagText += `✅ Доступность сервера: **Стабильно (Пинг 38мс)**\n\n`;
 
       if (hasError) {
-        diagTest += `💡 **Рекомендация:** У вас обнаружена проблема с подпиской или ключами. Пожалуйста, продлите доступ или обратитесь в поддержку.`;
+        diagText += `💡 **Рекомендация:** У вас обнаружена проблема с подпиской или ключами. Пожалуйста, продлите доступ или обратитесь в поддержку.`;
       } else {
-        diagTest += `🎉 **Все системы в норме!** Если интернет не работает, попробуйте обновить подписку в приложении или сменить сеть (Wi-Fi/Мобильный интернет).`;
+        diagText += `🎉 **Все системы в норме!** Если интернет не работает, попробуйте обновить подписку в приложении или сменить сеть.`;
       }
 
       const kb = { inline_keyboard: [[{ text: '🛒 Продлить / Купить', callback_data: 'buy_access' }, { text: '💬 Поддержка', callback_data: 'support' }], [{ text: '◀️ В меню', callback_data: 'main_menu' }]] };
-      await bot.sendMessage(chatId, diagTest, { parse_mode: 'Markdown', reply_markup: kb });
+      await bot.sendMessage(chatId, diagText, { parse_mode: 'Markdown', reply_markup: kb });
     }
     else if (data === 'inst_ios') {
       const text = `🍏 **Настройка для iPhone / iPad:**\n\n1. Установите **Streisand** из App Store.\n2. Скопируйте ключ и импортируйте через буфер обмена.`;
@@ -302,7 +297,7 @@ bot.on('callback_query', async (query) => {
       delete userStates[userId];
       await bot.sendMessage(chatId, '👋 **Главное меню STROMVPN**', { parse_mode: 'Markdown', reply_markup: getMainMenuKeyboard() });
     }
-    // Одобрение платежа (с поддержкой выдачи нескольких ключей для семейного тарифа)
+    // Одобрение платежа
     else if (data.startsWith('approve_')) {
       const txId = data.replace('approve_', '');
       const txRaw = await redis.get(`tx:${txId}`);
@@ -310,13 +305,8 @@ bot.on('callback_query', async (query) => {
       const tx = typeof txRaw === 'string' ? JSON.parse(txRaw) : txRaw;
       if (tx.status !== 'pending') return bot.sendMessage(chatId, '⚠️ Уже обработано');
 
-      let issuedKeys = [];
-      for (let i = 0; i < (tx.count || 1); i++) {
-        const nextKey = await redis.lpop('admin:pool:keys');
-        if (nextKey) issuedKeys.push(nextKey);
-      }
-
-      if (issuedKeys.length === 0) {
+      const nextKey = await redis.lpop('admin:pool:keys');
+      if (!nextKey) {
         return bot.sendMessage(chatId, '❌ **В пуле нет свободных ключей!** Загрузите их через веб-панель.');
       }
 
@@ -334,21 +324,18 @@ bot.on('callback_query', async (query) => {
       const expireTime = Date.now() + (tx.days || 30) * 24 * 60 * 60 * 1000;
       await redis.set(`user:${tx.userId}:expire`, expireTime);
 
-      for (let kUrl of issuedKeys) {
-        await redis.rpush(`user:${tx.userId}:keys`, kUrl);
-        await redis.rpush('global:keys', JSON.stringify({
-          userId: tx.userId,
-          username: tx.username,
-          vlessUrl: kUrl,
-          created: new Date().toISOString(),
-          expire: expireTime
-        }));
-      }
+      await redis.rpush(`user:${tx.userId}:keys`, nextKey);
+      await redis.rpush('global:keys', JSON.stringify({
+        userId: tx.userId,
+        username: tx.username,
+        vlessUrl: nextKey,
+        created: new Date().toISOString(),
+        expire: expireTime
+      }));
 
-      let keysFormatted = issuedKeys.map((k, i) => `**Ключ #${i + 1}:**\n\`${k}\``).join('\n\n');
       const successKb = { inline_keyboard: [[{ text: '📖 Инструкция', callback_data: 'instructions' }]] };
-      await bot.sendMessage(tx.userId, `🎉 **Ваш платеж одобрен! Подписка активна на ${tx.days} дн.**\n\n🔑 Ваши ключи:\n\n${keysFormatted}`, { parse_mode: 'Markdown', reply_markup: successKb });
-      await bot.sendMessage(chatId, `✅ **Платёж одобрен! Ключи (${issuedKeys.length} шт.) выданы.**`);
+      await bot.sendMessage(tx.userId, `🎉 **Ваш платеж одобрен! Подписка активна на ${tx.days} дн.**\n\n🔑 Ваш ключ:\n\`${nextKey}\``, { parse_mode: 'Markdown', reply_markup: successKb });
+      await bot.sendMessage(chatId, `✅ **Платёж одобрен! Ключ выдан.**`);
     }
     else if (data.startsWith('reject_')) {
       const txId = data.replace('reject_', '');
